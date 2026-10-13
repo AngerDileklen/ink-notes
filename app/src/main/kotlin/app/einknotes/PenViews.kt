@@ -121,13 +121,12 @@ class PenLogic(private val stats: Stats, private val ink: InkBitmap) {
 class PenView(
     context: Context,
     private val stats: Stats,
-    private val dirtyOnly: Boolean,
-    private val onLog: (String) -> Unit
+    private val dirtyOnly: Boolean
 ) : View(context), PenSurface {
 
     private val ink = InkBitmap()
     private val logic = PenLogic(stats, ink)
-    private var lastEventTime = 0L
+    private var penEventTime = 0L      // set only when a pen event caused the redraw we are waiting for
 
     override val modeName get() = if (dirtyOnly) "VIEW dirty-rect" else "VIEW full-redraw"
     override fun clearInk() { ink.clear(); invalidate() }
@@ -138,31 +137,27 @@ class PenView(
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        onLog(stats.onMotion(e, "touch"))
-        lastEventTime = e.eventTime
         val dirty = logic.handle(e)
         if (dirty != null) {
+            penEventTime = e.eventTime
             if (dirtyOnly) invalidate(dirty) else invalidate()
         }
         return true
     }
 
-    override fun onGenericMotionEvent(e: MotionEvent): Boolean {
-        onLog(stats.onMotion(e, "hover"))   // pen hovering above the glass (if the digitizer reports it)
-        return true
-    }
-
     override fun onDraw(canvas: Canvas) {
         ink.bmp?.let { canvas.drawBitmap(it, 0f, 0f, null) }
-        if (lastEventTime != 0L) stats.recordLatency(SystemClock.uptimeMillis() - lastEventTime)
+        if (penEventTime != 0L) {
+            stats.recordLatency(SystemClock.uptimeMillis() - penEventTime)
+            penEventTime = 0L
+        }
     }
 }
 
 /** Path C: SurfaceView, pushing only the dirty rectangle of the page to the screen. */
 class SurfacePenView(
     context: Context,
-    private val stats: Stats,
-    private val onLog: (String) -> Unit
+    private val stats: Stats
 ) : SurfaceView(context), PenSurface, SurfaceHolder.Callback {
 
     private val ink = InkBitmap()
@@ -179,17 +174,11 @@ class SurfacePenView(
     override fun surfaceDestroyed(h: SurfaceHolder) { }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        onLog(stats.onMotion(e, "touch"))
         val dirty = logic.handle(e)
         if (dirty != null) {
             present(dirty)
             stats.recordLatency(SystemClock.uptimeMillis() - e.eventTime)
         }
-        return true
-    }
-
-    override fun onGenericMotionEvent(e: MotionEvent): Boolean {
-        onLog(stats.onMotion(e, "hover"))
         return true
     }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Waits for ONE report POSTed by the Ink Probe app, saves it, then exits. Stops after 10 minutes."""
+"""Waits for ONE report POSTed by the Ink Probe app, saves it, then exits. Stops after 30 minutes."""
 import http.server, socket, sys, time, os
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "reports")
 os.makedirs(OUT, exist_ok=True)
@@ -35,6 +35,6 @@ def lan_ip():
 ip = lan_ip()
 srv = http.server.HTTPServer(("0.0.0.0", 8765), H); srv.done = False; srv.timeout = 5
 print(f"Type this into the app's address box:  http://{ip}:8765/", flush=True)
-end = time.time() + 600
+end = time.time() + 1800
 while not srv.done and time.time() < end: srv.handle_request()
 sys.exit(0 if srv.done else 1)

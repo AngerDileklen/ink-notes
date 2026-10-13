@@ -16,14 +16,19 @@ class Stats {
         val actions = sortedSetOf<String>()
         var samples = 0L          // includes batched "historical" samples
         var contactMs = 0L        // total time between DOWN and UP
-        var pressureSteps = sortedSetOf<Float>() // distinct pressure values (capped), shows resolution
+        val pressureSteps = sortedSetOf<Float>()
     }
 
     val tools = linkedMapOf<String, ToolStat>()
     val keys = linkedMapOf<String, Int>()
+    val ratings = linkedMapOf<String, Int>()   // drawing mode -> your 1..5 speed rating
     var totalEvents = 0L
 
-    // app-side latency: eventTime -> end of onDraw. This is a LOWER BOUND; it excludes the panel.
+    /** Gets a short, de-duplicated description of every input event (used by the guided test). */
+    var descriptorSink: ((String) -> Unit)? = null
+    @Volatile var muted = false
+
+    // App-side latency: pen event -> end of the draw it caused. Lower bound only: the panel adds more.
     var latSumMs = 0L
     var latCount = 0L
     var latMaxMs = 0L
@@ -76,17 +81,24 @@ class Stats {
             MotionEvent.ACTION_DOWN -> { st.downs++; downTime = e.eventTime }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> st.contactMs += (e.eventTime - downTime)
         }
+        val dev = e.device?.name ?: "?"
+        if (!muted) descriptorSink?.invoke("MOTION tool=$tool action=$action btn=${buttonNames(e.buttonState)} dev=$dev")
         return "$source $tool $action p=${"%.3f".format(p)} btn=${buttonNames(e.buttonState)} " +
-            "xy=${e.x.toInt()},${e.y.toInt()} h=${e.historySize} tilt=${"%.2f".format(tilt)} d=${"%.2f".format(dist)}"
+            "xy=${e.x.toInt()},${e.y.toInt()} h=${e.historySize}"
     }
 
     fun onKey(e: KeyEvent): String {
-        val label = "${KeyEvent.keyCodeToString(e.keyCode)} scan=${e.scanCode}"
+        val dev = e.device?.name ?: "dev#${e.deviceId}"
+        val label = "${KeyEvent.keyCodeToString(e.keyCode)} scan=${e.scanCode} dev=$dev src=0x${Integer.toHexString(e.source)}"
+        val phase = if (e.action == KeyEvent.ACTION_DOWN) (if (e.repeatCount > 0) "repeat" else "down") else "up"
         if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) keys[label] = (keys[label] ?: 0) + 1
-        return "KEY ${if (e.action == KeyEvent.ACTION_DOWN) "down" else "up"} $label rep=${e.repeatCount} dev=${e.deviceId}"
+        if (!muted) descriptorSink?.invoke("KEY $phase $label flags=0x${Integer.toHexString(e.flags)}")
+        return "KEY $phase $label"
     }
 
     fun recordLatency(ms: Long) {
+        // Ignore absurd values caused by redraws that were not triggered by the pen.
+        if (ms < 0 || ms > 5000) return
         lastLatencyMs = ms
         latSumMs += ms
         latCount++
@@ -112,10 +124,13 @@ class Stats {
             sb.append("  maxTilt=${"%.2f".format(s.maxTilt)} maxHoverDistance=${"%.2f".format(s.maxDistance)}\n")
             sb.append("  approxSampleRate=${"%.0f".format(hz)} Hz (while touching)\n")
         }
-        sb.append("hardware keys seen: ")
-        sb.append(if (keys.isEmpty()) "(none)\n" else "\n")
+        sb.append("hardware keys that reached the app:")
+        sb.append(if (keys.isEmpty()) " (none)\n" else "\n")
         for ((k, n) in keys) sb.append("  $k  x$n\n")
-        sb.append("app-side latency (event->end of onDraw, lower bound): avg=${"%.1f".format(avgLatencyMs())} ms max=$latMaxMs ms n=$latCount\n")
+        sb.append("your speed ratings (1 slow .. 5 fast): ")
+        sb.append(if (ratings.isEmpty()) "(none given)\n" else ratings.entries.joinToString("; ") { "${it.key}=${it.value}" } + "\n")
+        sb.append("app-side latency of the CURRENT mode (pen event -> end of draw, lower bound): " +
+            "avg=${"%.1f".format(avgLatencyMs())} ms max=$latMaxMs ms n=$latCount\n")
         return sb.toString()
     }
 }

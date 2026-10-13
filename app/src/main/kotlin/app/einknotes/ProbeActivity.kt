@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
@@ -31,15 +32,17 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Ink Probe: a small test bench for an e-ink tablet with a pen-only digitizer.
+ * Ink Probe v0.2: a test bench for an e-ink tablet with a pen-only digitizer.
  *  - draws with the pen tip, erases with the eraser end, grey ink while the side button is held
- *  - logs every pen event and every hardware key (all keys are swallowed so we can see them)
- *  - lets you compare three ways of putting ink on screen
- *  - writes a device report and can POST it to the Mac
+ *  - logs pen events and hardware keys (keys are swallowed on the drawing screen so we can see them)
+ *  - lets you compare three ways of putting ink on screen and rate each one
+ *  - a guided test walks through hover, side button, eraser and all nine buttons
+ *  - builds a device report, saves it, and can POST it to the Mac
  */
 class ProbeActivity : Activity() {
 
     private val stats = Stats()
+    private val runner = TestRunner()
     private val ui = Handler(Looper.getMainLooper())
     private val logLines = ArrayDeque<String>()
     private var logDirty = false
@@ -47,11 +50,19 @@ class ProbeActivity : Activity() {
     private lateinit var host: FrameLayout
     private lateinit var status: TextView
     private lateinit var logView: TextView
+    private lateinit var modeButton: Button
+    private lateinit var pen: PenSurface
+
+    private lateinit var testPanel: LinearLayout
+    private lateinit var testTitle: TextView
+    private lateinit var testText: TextView
+    private lateinit var testLive: TextView
+    private lateinit var testNextButton: Button
+
     private lateinit var reportPanel: LinearLayout
     private lateinit var reportText: TextView
     private lateinit var urlField: EditText
-    private lateinit var modeButton: Button
-    private lateinit var pen: PenSurface
+
     private var modeIndex = 0
     private var lastReport = ""
 
@@ -70,13 +81,19 @@ class ProbeActivity : Activity() {
 
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         modeButton = button("Mode") { cycleMode() }
-        bar.addView(modeButton, weightParams())
+        bar.addView(modeButton, weightParams(2f))
         bar.addView(button("Clear") { pen.clearInk(); stats.resetLatency() }, weightParams())
+        bar.addView(button("Test") { startTest() }, weightParams())
         bar.addView(button("Report") { showReport() }, weightParams())
         bar.addView(button("Exit") { finish() }, weightParams())
         root.addView(bar)
 
-        status = mono(13f)
+        val rate = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        rate.addView(mono(12f).apply { text = "Speed of this mode (1 slow, 5 fast):" })
+        for (n in 1..5) rate.addView(button("$n") { rateMode(n) }, weightParams(0.6f))
+        root.addView(rate)
+
+        status = mono(12f)
         logView = mono(11f)
         root.addView(status)
         root.addView(logView)
@@ -86,25 +103,26 @@ class ProbeActivity : Activity() {
 
         val frame = FrameLayout(this)
         frame.addView(root)
-
-        reportPanel = buildReportPanel()
-        reportPanel.visibility = View.GONE
+        testPanel = buildTestPanel().also { it.visibility = View.GONE }
+        frame.addView(testPanel)
+        reportPanel = buildReportPanel().also { it.visibility = View.GONE }
         frame.addView(reportPanel)
         setContentView(frame)
 
+        stats.descriptorSink = { runner.record(it) }
         selectMode(0)
         ui.post(refresher)
     }
 
-    // ---- modes -------------------------------------------------------------------------------
+    // ---- modes and ratings -------------------------------------------------------------------
 
     private fun selectMode(i: Int) {
         modeIndex = i
         host.removeAllViews()
         pen = when (i) {
-            0 -> PenView(this, stats, dirtyOnly = false, onLog = ::log)
-            1 -> PenView(this, stats, dirtyOnly = true, onLog = ::log)
-            else -> SurfacePenView(this, stats, onLog = ::log)
+            0 -> PenView(this, stats, dirtyOnly = false)
+            1 -> PenView(this, stats, dirtyOnly = true)
+            else -> SurfacePenView(this, stats)
         }
         host.addView(pen.asView(), FrameLayout.LayoutParams(-1, -1))
         modeButton.text = "Mode: " + pen.modeName
@@ -113,21 +131,89 @@ class ProbeActivity : Activity() {
 
     private fun cycleMode() = selectMode((modeIndex + 1) % 3)
 
-    // ---- hardware keys -----------------------------------------------------------------------
+    private fun rateMode(n: Int) {
+        stats.ratings[pen.modeName] = n
+        log("rated ${pen.modeName} = $n")
+    }
 
-    /** Swallow every key so the 9 side buttons show up here instead of acting on the system. */
+    // ---- input: everything is observed here, before any view sees it --------------------------
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        // Taps on the test panel's own buttons must not be counted as part of a test step.
+        stats.muted = testPanel.visibility == View.VISIBLE && ev.y > testPanel.height - 260
+        log(stats.onMotion(ev, "touch"))
+        return super.dispatchTouchEvent(ev)
+    }
+
+    override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        log(stats.onMotion(ev, "generic"))   // hover, button press/release
+        return super.dispatchGenericMotionEvent(ev)
+    }
+
+    /** Swallow keys on the drawing and test screens so the side buttons show up here. */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // On the report screen the on-screen keyboard also sends key events, so let those through.
-        if (reportPanel.visibility == View.VISIBLE) return super.dispatchKeyEvent(event)
+        if (reportPanel.visibility == View.VISIBLE) return super.dispatchKeyEvent(event)  // keyboard needs these
         log(stats.onKey(event))
         return true
+    }
+
+    // ---- guided test -------------------------------------------------------------------------
+
+    private fun buildTestPanel(): LinearLayout {
+        val p = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            isClickable = true
+            setPadding(24, 24, 24, 24)
+        }
+        testTitle = mono(20f)
+        testText = mono(17f)
+        testLive = mono(13f)
+        p.addView(testTitle)
+        p.addView(testText)
+        p.addView(testLive)
+        val spacer = View(this)
+        p.addView(spacer, LinearLayout.LayoutParams(1, 0, 1f))
+        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        testNextButton = button("Next") { advanceTest() }
+        bar.addView(testNextButton, weightParams(2f))
+        bar.addView(button("Stop") { runner.stop(); testPanel.visibility = View.GONE }, weightParams())
+        p.addView(bar)
+        return p
+    }
+
+    private fun startTest() {
+        runner.start()
+        testPanel.visibility = View.VISIBLE
+        showStep()
+    }
+
+    private fun advanceTest() {
+        runner.next()
+        if (runner.finished) {
+            testTitle.text = "Test finished"
+            testText.text = "Close this and tap Report to see and send the results."
+            testLive.text = ""
+            testNextButton.text = "Close"
+            testNextButton.setOnClickListener {
+                runner.stop(); testPanel.visibility = View.GONE
+                testNextButton.text = "Next"; testNextButton.setOnClickListener { advanceTest() }
+            }
+        } else showStep()
+    }
+
+    private fun showStep() {
+        val s = runner.steps[runner.index]
+        testTitle.text = "Step ${runner.index + 1}/${runner.steps.size}: ${s.title}"
+        testText.text = s.instruction
+        testLive.text = "events so far in this step: 0"
     }
 
     // ---- logging / status --------------------------------------------------------------------
 
     private fun log(line: String) {
         logLines.addLast(line)
-        while (logLines.size > 7) logLines.removeFirst()
+        while (logLines.size > 6) logLines.removeFirst()
         logDirty = true
     }
 
@@ -139,8 +225,9 @@ class ProbeActivity : Activity() {
                 logView.text = logLines.joinToString("\n")
                 status.text = "latency(app side) last=${stats.lastLatencyMs}ms avg=${"%.1f".format(stats.avgLatencyMs())}ms " +
                     "max=${stats.latMaxMs}ms events=${stats.totalEvents}"
+                if (runner.running) testLive.text = "events so far in this step: ${runner.liveCount()}"
             }
-            ui.postDelayed(this, 400)
+            ui.postDelayed(this, 500)
         }
     }
 
@@ -175,13 +262,15 @@ class ProbeActivity : Activity() {
 
     private fun showReport() {
         reportPanel.visibility = View.VISIBLE
-        reportText.text = "building report..."
+        reportText.text = "building report (scanning system files, a few seconds)..."
+        val testsText = runner.reportText()
         Thread {
-            val body = DeviceReport.build(this, stats)
-            val header = "Ink Probe report ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}\n"
-            lastReport = header + body
-            val saved = save(lastReport, DeviceReport.fullProps())
-            ui.post { reportText.text = lastReport + "\n\nSaved: $saved" }
+            val body = DeviceReport.build(this, stats, testsText)
+            val header = "Ink Probe v0.2 report ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}\n"
+            val props = DeviceReport.fullProps()
+            lastReport = header + body + "\n==== FULL getprop ====\n" + props
+            val saved = save(lastReport, props)
+            ui.post { reportText.text = lastReport.take(60000) + "\n\nSaved: $saved" }
         }.start()
     }
 
@@ -209,7 +298,7 @@ class ProbeActivity : Activity() {
             reportText.text = "Type the Mac address first (http://MAC-IP:8765/) and wait for the report to finish.\n\n$lastReport"
             return
         }
-        reportText.text = "sending to $url ...\n\n$lastReport"
+        reportText.text = "sending to $url ...\n\n${lastReport.take(60000)}"
         Thread {
             val result = try {
                 val c = URL(url).openConnection() as HttpURLConnection
@@ -221,7 +310,7 @@ class ProbeActivity : Activity() {
                 c.outputStream.use { it.write(lastReport.toByteArray()) }
                 "sent, server said HTTP ${c.responseCode}"
             } catch (t: Throwable) { "send failed: $t" }
-            ui.post { reportText.text = "$result\n\n$lastReport" }
+            ui.post { reportText.text = "$result\n\n${lastReport.take(60000)}" }
         }.start()
     }
 
@@ -229,9 +318,9 @@ class ProbeActivity : Activity() {
 
     private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
         text = label
-        textSize = 15f
+        textSize = 14f
         isAllCaps = false
-        minHeight = 120
+        minHeight = 110
         setOnClickListener { onClick() }
     }
 
@@ -243,7 +332,7 @@ class ProbeActivity : Activity() {
         gravity = Gravity.START
     }
 
-    private fun weightParams() = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+    private fun weightParams(w: Float = 1f) = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, w)
 
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
         super.onRequestPermissionsResult(code, perms, results)

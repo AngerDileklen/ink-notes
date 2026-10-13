@@ -1,6 +1,8 @@
 package app.einknotes
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
 import android.util.DisplayMetrics
@@ -8,6 +10,7 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.WindowManager
 import java.io.File
+import java.util.zip.ZipFile
 
 /**
  * Read-only fact finding about the tablet. Nothing here changes any setting.
@@ -19,7 +22,7 @@ object DeviceReport {
         "(?i)(eink|e-ink|epd|ebc|wacom|stylus|waveform|ghost|refresh|penstar|hanvon|handwrit|ink|pen\\b|pen\\.)"
     )
 
-    fun build(ctx: Context, stats: Stats): String {
+    fun build(ctx: Context, stats: Stats, tests: String): String {
         val sb = StringBuilder()
         fun section(title: String, body: () -> String) {
             sb.append("\n==== ").append(title).append(" ====\n")
@@ -160,8 +163,102 @@ object DeviceReport {
             out.toString()
         }
 
+        section("Shared libraries registered with the system") {
+            (ctx.packageManager.systemSharedLibraryNames ?: emptyArray()).sorted().joinToString("\n")
+        }
+
+        section("Permission XML files from the vendor") {
+            val out = StringBuilder()
+            val rx = Regex("(?i)(hanvon|hv|eink|ebc|epd|rockchip|pen|ink|wacom)")
+            for (d in listOf("/system/etc/permissions", "/vendor/etc/permissions", "/system_ext/etc/permissions",
+                "/product/etc/permissions", "/odm/etc/permissions")) {
+                val l = File(d).list()
+                out.append("$d: ${l?.size ?: "(not listable)"} files; matching: ${l?.sorted()?.filter { rx.containsMatchIn(it) }?.joinToString(", ") ?: ""}\n")
+            }
+            out.toString()
+        }
+
+        section("Hanvon and reader apps: what they declare") {
+            val pm = ctx.packageManager
+            val out = StringBuilder()
+            val pkgs = listOf("hanvon.aebr.hvnote", "hanvon.aebr.hvtextnote", "hanvon.aebr.hvmyscriptrecognition",
+                "hanvon.aebr.hvsettings", "com.xodo.pdf.reader", "com.microsoft.office.onenote")
+            val flags = PackageManager.GET_PERMISSIONS or PackageManager.GET_SERVICES or
+                PackageManager.GET_ACTIVITIES or PackageManager.GET_SHARED_LIBRARY_FILES
+            for (pkg in pkgs) {
+                try {
+                    val pi = pm.getPackageInfo(pkg, flags)
+                    val ai = pi.applicationInfo
+                    out.append("--- $pkg v${pi.versionName} system=${ai.flags and ApplicationInfo.FLAG_SYSTEM != 0}\n")
+                    out.append("    apk=${ai.sourceDir} size=${File(ai.sourceDir).length() / 1024}KB\n")
+                    File(ai.nativeLibraryDir).list()?.let { out.append("    native libs: ${it.sorted().joinToString()}\n") }
+                    ai.sharedLibraryFiles?.let { out.append("    shared lib files: ${it.joinToString()}\n") }
+                    val perms = pi.requestedPermissions?.toList() ?: emptyList()
+                    out.append("    permissions: ${perms.size}; non-standard/notable: " +
+                        perms.filter { !it.startsWith("android.permission.") || it.contains("SETTINGS") || it.contains("ALERT_WINDOW") || it.contains("ACCESSIBILITY") }
+                            .joinToString() + "\n")
+                    out.append("    services: ${pi.services?.joinToString { it.name.substringAfterLast('.') }?.take(900)}\n")
+                    out.append("    activities(${pi.activities?.size}): ${pi.activities?.joinToString { it.name.substringAfterLast('.') }?.take(900)}\n")
+                } catch (t: Throwable) { out.append("--- $pkg: $t\n") }
+            }
+            out.toString()
+        }
+
+        section("E-ink related strings inside vendor/system code (read-only scan)") {
+            val out = StringBuilder()
+            val pm = ctx.packageManager
+            fun apk(pkg: String) = try { pm.getApplicationInfo(pkg, 0).sourceDir } catch (_: Throwable) { null }
+            out.append(scanStrings("/vendor/lib64/libeink.so", einkRegex, 150))
+            out.append(scanStrings("/system/framework/framework.jar", einkRegex, 80))
+            out.append(scanStrings("/system/framework/services.jar", Regex("(?i)(eink|ebc[a-z_/]|hanvon[a-z_]*|customkey)"), 80))
+            apk("hanvon.aebr.hvnote")?.let { out.append(scanStrings(it, einkRegex, 120)) }
+            apk("hanvon.aebr.hvsettings")?.let {
+                out.append(scanStrings(it, Regex("(?i)(pen_?key|pen_switch|btnStatus|usercustomkey|keytype|penbutton)"), 80))
+            }
+            out.toString()
+        }
+
+        section("Guided test results (pen + the nine buttons)") { tests }
+
         section("Pen / key statistics from this session") { stats.summary() }
         return sb.toString()
+    }
+
+
+    private val einkRegex = Regex("(?i)(eink|e-ink|ebc[a-z_/]|/dev/ebc|epd[a-z_]|waveform|dither|refreshmode|fullrefresh|a2mode|fastmode|regal)")
+
+    /**
+     * Lists printable-text runs that match [rx], from a plain file or from every .dex inside a jar/apk.
+     * This only READS the file; it is how we discover which e-ink calls the vendor software uses.
+     */
+    private fun scanStrings(path: String, rx: Regex, limit: Int): String {
+        val f = File(path)
+        if (!f.exists()) return "$path: missing\n"
+        if (!f.canRead()) return "$path: not readable\n"
+        val found = linkedSetOf<String>()
+        fun scan(bytes: ByteArray) {
+            val sb = StringBuilder()
+            for (b in bytes) {
+                val c = b.toInt() and 0xff
+                if (c in 32..126) {
+                    if (sb.length < 300) sb.append(c.toChar())
+                } else {
+                    if (sb.length >= 5 && rx.containsMatchIn(sb) && found.size < limit) found.add(sb.toString().take(170))
+                    sb.setLength(0)
+                }
+            }
+        }
+        try {
+            if (path.endsWith(".so")) scan(f.readBytes())
+            else ZipFile(f).use { z ->
+                for (e in z.entries()) {
+                    if (e.name.endsWith(".dex")) scan(z.getInputStream(e).readBytes())
+                    else if (e.name.startsWith("lib/") && e.name.contains("arm64")) found.add("[lib in apk] ${e.name}")
+                    if (found.size >= limit) break
+                }
+            }
+        } catch (t: Throwable) { return "$path: scan error $t\n" }
+        return "$path (${f.length() / 1024}KB): ${found.size} matches\n" + found.joinToString("\n") { "    $it" } + "\n"
     }
 
     fun fullProps(): String = run(arrayOf("getprop"))
