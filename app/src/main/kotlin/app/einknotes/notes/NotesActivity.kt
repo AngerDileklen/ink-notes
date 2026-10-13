@@ -1,7 +1,9 @@
 package app.einknotes.notes
 
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.IntentFilter
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -9,6 +11,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.provider.Settings
 import android.view.KeyEvent
 import android.view.View
@@ -107,6 +110,38 @@ class NotesActivity : Activity(), InkView.Host {
 
         selectTool(Tool.PEN)
         refreshChrome()
+        registerDebugControl()
+    }
+
+    /**
+     * Debug builds only (never in a release build): lets a developer drive the app over USB with
+     *   adb shell am broadcast -a app.einknotes.DEBUG --es cmd <command>
+     * commands: virtual_on, virtual_off, state, tool_pen, tool_erase, tool_hand, undo, redo, page_next, page_prev,
+     * zoom_in, zoom_out, add_page, save. Results go to logcat under the tag InkDebug.
+     */
+    private fun registerDebugControl() {
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
+        registerReceiver(object : BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                val cmd = i.getStringExtra("cmd") ?: return
+                when (cmd) {
+                    "virtual_on" -> ink.acceptVirtual = true
+                    "virtual_off" -> ink.acceptVirtual = false
+                    "tool_pen" -> selectTool(Tool.PEN)
+                    "tool_erase" -> selectTool(Tool.ERASER)
+                    "tool_hand" -> selectTool(Tool.HAND)
+                    "undo" -> ink.undo()
+                    "redo" -> ink.redo()
+                    "page_next" -> goPage(1)
+                    "page_prev" -> goPage(-1)
+                    "zoom_in" -> ink.zoomBy(1)
+                    "zoom_out" -> ink.zoomBy(-1)
+                    "add_page" -> ink.addPageAfterCurrent()
+                    "save" -> save()
+                }
+                Log.d("InkDebug", "cmd=$cmd -> ${ink.describe()} einkMode=${EinkController.nameOf(eink.readMode())}")
+            }
+        }, IntentFilter("app.einknotes.DEBUG"))
     }
 
     // ---- toolbar helpers ---------------------------------------------------------------------

@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.ceil
@@ -37,6 +38,12 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
     var tool = Tool.PEN
     /** What the pen's side button does while it is held. */
     var sideButtonTool = Tool.ERASER
+    /** Debug builds only: let adb-injected "Virtual" strokes draw, so the app can be tested over USB. */
+    var acceptVirtual = false
+
+    fun describe(): String =
+        "page=${pageIndex + 1}/${note.pages.size} strokes=${page.strokes.size} tool=$tool zoomIndex=$zoomIndex scale=${"%.3f".format(scale)} " +
+            "paper=${page.paper} undo=${undoStack.size} redo=${redoStack.size} view=${width}x${height}"
 
     val page: PageData get() = note.pages[pageIndex]
 
@@ -79,6 +86,8 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
 
     // the erase gesture being performed right now
     private var erasing = false
+    private var eraseLastX = 0f
+    private var eraseLastY = 0f
     private val erased = ArrayList<Pair<Int, Stroke>>()
     private var rebuildPending = false
 
@@ -317,9 +326,15 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
 
     // ---- input -------------------------------------------------------------------------------
 
+    private val debuggable = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (debuggable && (e.actionMasked == MotionEvent.ACTION_DOWN || e.actionMasked == MotionEvent.ACTION_UP)) {
+            Log.d("InkView", "touch action=${e.actionMasked} tool=${e.getToolType(0)} deviceId=${e.deviceId} " +
+                "dev=${e.device?.name} source=0x${Integer.toHexString(e.source)} p=${e.pressure} xy=${e.x.toInt()},${e.y.toInt()}")
+        }
         // The firmware injects fake swipes (device "Virtual") when a volume button is pressed. Never draw those.
-        if (e.device?.name == "Virtual" || e.deviceId < 0) return true
+        if ((e.device?.name == "Virtual" || e.deviceId < 0) && !acceptVirtual) return true
         val toolType = e.getToolType(0)
         if (toolType == MotionEvent.TOOL_TYPE_FINGER) return true   // this tablet has no finger touch; ignore strays
 
@@ -335,7 +350,7 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
                 lastVx = e.x; lastVy = e.y
                 when (active) {
                     Tool.PEN -> beginStroke(e.x, e.y, e.pressure)
-                    Tool.ERASER -> { erasing = true; erased.clear(); eraseAt(e.x, e.y) }
+                    Tool.ERASER -> { erasing = true; erased.clear(); eraseLastX = e.x; eraseLastY = e.y; eraseAt(e.x, e.y) }
                     Tool.HAND -> { panning = true; panLastX = e.x; panLastY = e.y }
                 }
             }
@@ -345,7 +360,14 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 when {
-                    live != null -> endStroke()
+                    live != null -> {
+                        // The lift-off position is part of the stroke: without it every line ends a little short.
+                        if (e.actionMasked == MotionEvent.ACTION_UP) {
+                            for (i in 0 until e.historySize) move(active, e.getHistoricalX(i), e.getHistoricalY(i), e.getHistoricalPressure(i))
+                            finalPoint(e.x, e.y)
+                        }
+                        endStroke()
+                    }
                     erasing -> endErase()
                     panning -> { panning = false; rebuild() }
                 }
@@ -358,7 +380,7 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
     private fun move(active: Tool, x: Float, y: Float, rawPressure: Float) {
         when {
             live != null && active == Tool.PEN -> addStrokePoint(x, y, rawPressure)
-            erasing -> eraseAt(x, y)
+            erasing -> eraseAlong(x, y)
             panning -> {
                 tx += x - panLastX; ty += y - panLastY
                 panLastX = x; panLastY = y
@@ -386,6 +408,15 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
         if (dx * dx + dy * dy < 1f) return
         lastVx = x; lastVy = y
         lastPressure = 0.6f * lastPressure + 0.4f * normalisePressure(rawPressure)   // gentle pressure smoothing
+        pushPoint(x, y, lastPressure)
+        flushLive()
+    }
+
+    /** Adds the pen-up position using the last known pressure (a lifted pen reports zero). */
+    private fun finalPoint(x: Float, y: Float) {
+        val dx = x - lastVx; val dy = y - lastVy
+        if (dx * dx + dy * dy < 0.25f) return
+        lastVx = x; lastVy = y
         pushPoint(x, y, lastPressure)
         flushLive()
     }
@@ -418,6 +449,15 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
     }
 
     // ---- erasing -----------------------------------------------------------------------------
+
+    /** Erases along the straight path from the previous sample, so fast movement cannot jump over a stroke. */
+    private fun eraseAlong(vx: Float, vy: Float) {
+        val dx = vx - eraseLastX; val dy = vy - eraseLastY
+        val dist = sqrt(dx * dx + dy * dy)
+        val steps = max(1, (dist / 8f).toInt())
+        for (i in 1..steps) eraseAt(eraseLastX + dx * i / steps, eraseLastY + dy * i / steps)
+        eraseLastX = vx; eraseLastY = vy
+    }
 
     private fun eraseAt(vx: Float, vy: Float) {
         val px = (vx - tx) / scale; val py = (vy - ty) / scale
