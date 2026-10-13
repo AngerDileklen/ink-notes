@@ -38,8 +38,11 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
     var tool = Tool.PEN
     /** What the pen's side button does while it is held. */
     var sideButtonTool = Tool.ERASER
-    /** Debug builds only: let adb-injected "Virtual" strokes draw, so the app can be tested over USB. */
-    var acceptVirtual = false
+    /** Until this time (uptimeMillis) "Virtual" pen input is treated as the firmware's fake page-turn swipe. */
+    private var ignoreVirtualUntil = 0L
+
+    /** Called when a volume button is pressed: the firmware then injects a fake swipe from a "Virtual" device. */
+    fun ignoreVirtualFor(ms: Long) { ignoreVirtualUntil = android.os.SystemClock.uptimeMillis() + ms }
 
     fun describe(): String =
         "page=${pageIndex + 1}/${note.pages.size} strokes=${page.strokes.size} tool=$tool zoomIndex=$zoomIndex scale=${"%.3f".format(scale)} " +
@@ -333,8 +336,10 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
             Log.d("InkView", "touch action=${e.actionMasked} tool=${e.getToolType(0)} deviceId=${e.deviceId} " +
                 "dev=${e.device?.name} source=0x${Integer.toHexString(e.source)} p=${e.pressure} xy=${e.x.toInt()},${e.y.toInt()}")
         }
-        // The firmware injects fake swipes (device "Virtual") when a volume button is pressed. Never draw those.
-        if ((e.device?.name == "Virtual" || e.deviceId < 0) && !acceptVirtual) return true
+        // The firmware injects a fake swipe (device "Virtual") right after a volume button. Never draw that one.
+        // Other "Virtual" pen input is real: when an accessibility service is active, Android relabels the real pen.
+        val virtual = e.device?.name == "Virtual" || e.deviceId < 0
+        if (virtual && android.os.SystemClock.uptimeMillis() < ignoreVirtualUntil) return true
         val toolType = e.getToolType(0)
         if (toolType == MotionEvent.TOOL_TYPE_FINGER) return true   // this tablet has no finger touch; ignore strays
 

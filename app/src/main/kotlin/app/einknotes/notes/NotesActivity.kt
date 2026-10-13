@@ -125,8 +125,6 @@ class NotesActivity : Activity(), InkView.Host {
             override fun onReceive(c: Context, i: Intent) {
                 val cmd = i.getStringExtra("cmd") ?: return
                 when (cmd) {
-                    "virtual_on" -> ink.acceptVirtual = true
-                    "virtual_off" -> ink.acceptVirtual = false
                     "tool_pen" -> selectTool(Tool.PEN)
                     "tool_erase" -> selectTool(Tool.ERASER)
                     "tool_hand" -> selectTool(Tool.HAND)
@@ -320,6 +318,9 @@ class NotesActivity : Activity(), InkView.Host {
             else -> false
         }
         if (!handled) return super.dispatchKeyEvent(ev)
+        if ((code == KeyEvent.KEYCODE_VOLUME_UP || code == KeyEvent.KEYCODE_VOLUME_DOWN) && ev.action == KeyEvent.ACTION_DOWN) {
+            ink.ignoreVirtualFor(1500)      // the firmware follows a volume press with a fake swipe
+        }
         if (ev.action == KeyEvent.ACTION_DOWN && ev.repeatCount == 0 && settingsPanel.visibility != View.VISIBLE) {
             val zoomed = ink.zoomIndex > 0
             when (code) {
