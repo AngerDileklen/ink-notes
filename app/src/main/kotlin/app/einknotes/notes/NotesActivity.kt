@@ -9,6 +9,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
@@ -48,6 +49,7 @@ class NotesActivity : Activity(), InkView.Host {
     private lateinit var polishBtn: Button
     private lateinit var paperBtn: Button
     private lateinit var sideBtn: Button
+    private lateinit var devStatus: TextView
 
     // fast-ink presets: (label, mode while writing, mode afterwards)
     private val presets = listOf(
@@ -185,9 +187,13 @@ class NotesActivity : Activity(), InkView.Host {
         for (b in listOf(inkModeBtn, polishBtn, paperBtn, sideBtn,
             tb("Full screen refresh now") { eink.fullRefresh(); hideSettings() },
             tb("Open device test tools (Probe)") { save(); startActivity(Intent(this, ProbeActivity::class.java)) },
+            tb("Android 'About' screen (tap Build number 7 times)") { openAbout() },
+            tb("Developer options (after unlocking)") { openDeveloperOptions() },
             tb("Close") { hideSettings() })) {
             p.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = 24 })
         }
+        devStatus = TextView(this).apply { textSize = 14f; setTextColor(Color.BLACK); setPadding(0, 28, 0, 0) }
+        p.addView(devStatus)
         p.addView(TextView(this).apply {
             text = "Buttons: Volume Up/Down turn pages. In the tablet's own settings you can also give buttons " +
                 "Zoom In/Out, arrow keys, Page Up/Down, Tab (next tool) or Enter (new page); they work here."
@@ -196,7 +202,50 @@ class NotesActivity : Activity(), InkView.Host {
         return p
     }
 
-    private fun showSettings() { refreshChrome(); settingsPanel.visibility = View.VISIBLE }
+    private fun showSettings() {
+        refreshChrome()
+        updateDevStatus()
+        settingsPanel.visibility = View.VISIBLE
+    }
+
+    private fun updateDevStatus() {
+        val dev = Settings.Global.getInt(contentResolver, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) == 1
+        val adb = Settings.Global.getInt(contentResolver, Settings.Global.ADB_ENABLED, 0) == 1
+        devStatus.text = "Developer options: " + (if (dev) "ON" else "off") + "   USB debugging: " + (if (adb) "ON" else "off")
+    }
+
+    /** Starts the first of these screens that exists on this firmware. */
+    private fun startFirst(vararg intents: Intent): Boolean {
+        for (i in intents) {
+            try {
+                if (i.resolveActivity(packageManager) != null) {
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(i)
+                    return true
+                }
+            } catch (_: Throwable) { }
+        }
+        return false
+    }
+
+    private fun openAbout() {
+        val ok = startFirst(
+            Intent(Settings.ACTION_DEVICE_INFO_SETTINGS),
+            Intent().setClassName("com.android.settings", "com.android.settings.Settings\$MyDeviceInfoActivity"),
+            Intent().setClassName("com.android.settings", "com.android.settings.Settings\$DeviceInfoSettingsActivity"),
+            Intent(Settings.ACTION_SETTINGS)
+        )
+        if (!ok) Toast.makeText(this, "No About screen found on this firmware", Toast.LENGTH_LONG).show()
+    }
+
+    private fun openDeveloperOptions() {
+        val ok = startFirst(
+            Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS),
+            Intent().setClassName("com.android.settings", "com.android.settings.Settings\$DevelopmentSettingsDashboardActivity"),
+            Intent().setClassName("com.android.settings", "com.android.settings.DevelopmentSettings")
+        )
+        if (!ok) Toast.makeText(this, "Developer options are still locked: unlock them from the About screen first", Toast.LENGTH_LONG).show()
+    }
     private fun hideSettings() { settingsPanel.visibility = View.GONE; ink.repaintAll() }
 
     // ---- InkView.Host ------------------------------------------------------------------------
@@ -260,6 +309,11 @@ class NotesActivity : Activity(), InkView.Host {
         try { NoteStore.save(note, file) } catch (t: Throwable) {
             Toast.makeText(this, "Could not save: $t", Toast.LENGTH_LONG).show()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::devStatus.isInitialized && settingsPanel.visibility == View.VISIBLE) updateDevStatus()
     }
 
     // The panel mode is system-wide, so always hand it back when we leave.
