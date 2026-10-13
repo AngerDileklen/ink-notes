@@ -22,7 +22,7 @@ object DeviceReport {
         "(?i)(eink|e-ink|epd|ebc|wacom|stylus|waveform|ghost|refresh|penstar|hanvon|handwrit|ink|pen\\b|pen\\.)"
     )
 
-    fun build(ctx: Context, stats: Stats, tests: String): String {
+    fun build(ctx: Context, stats: Stats, tests: String, einkLab: String): String {
         val sb = StringBuilder()
         fun section(title: String, body: () -> String) {
             sb.append("\n==== ").append(title).append(" ====\n")
@@ -222,6 +222,7 @@ object DeviceReport {
 
         section("Guided test results (pen + the nine buttons)") { tests }
 
+        section("Display mode lab: what the system accepted") { einkLab }
         section("Pen / key statistics from this session") { stats.summary() }
         return sb.toString()
     }

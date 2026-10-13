@@ -63,6 +63,24 @@ class ProbeActivity : Activity() {
     private lateinit var reportText: TextView
     private lateinit var urlField: EditText
 
+    private lateinit var eink: EinkController
+    private lateinit var einkStatus: TextView
+    private lateinit var fastButton: Button
+    private var presetIndex = 0
+    private var inFast = false
+    private val presets: List<Triple<String, String?, String?>> = listOf(
+        Triple("off", null, null),
+        Triple("A2>GL16", EinkController.A2, EinkController.PART_GL16),
+        Triple("DU>GL16", EinkController.DU, EinkController.PART_GL16),
+        Triple("AutoDU>GC16", EinkController.AUTO_DU, EinkController.PART_GC16),
+        Triple("DU4>GL16", EinkController.DU4, EinkController.PART_GL16)
+    )
+    private val settleToQuality = Runnable {
+        val q = presets[presetIndex].third ?: return@Runnable
+        inFast = false
+        eink.set(q, "pen idle") { einkStatus.text = statusLine(it) }
+    }
+
     private var modeIndex = 0
     private var lastReport = ""
 
@@ -92,6 +110,26 @@ class ProbeActivity : Activity() {
         rate.addView(mono(12f).apply { text = "Speed of this mode (1 slow, 5 fast):" })
         for (n in 1..5) rate.addView(button("$n") { rateMode(n) }, weightParams(0.6f))
         root.addView(rate)
+
+        eink = EinkController(this)
+        val prevHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e -> eink.restoreNow(); prevHandler?.uncaughtException(t, e) }
+
+        val modes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((label, code) in listOf("Auto" to EinkController.AUTO, "GC16" to EinkController.PART_GC16,
+            "GL16" to EinkController.PART_GL16, "A2" to EinkController.A2, "DU" to EinkController.DU,
+            "DU4" to EinkController.DU4, "AutoDU" to EinkController.AUTO_DU)) {
+            modes.addView(button(label) { eink.set(code, "button") { einkStatus.text = statusLine(it) } }, weightParams())
+        }
+        root.addView(modes)
+        val acts = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        acts.addView(button("Full refresh") { eink.fullRefresh { einkStatus.text = statusLine(it) } }, weightParams())
+        acts.addView(button("Restore") { cancelFast(); eink.restore { einkStatus.text = statusLine(it) } }, weightParams())
+        fastButton = button("Fast ink: off") { cycleFast() }
+        acts.addView(fastButton, weightParams(2f))
+        root.addView(acts)
+        einkStatus = mono(11f).apply { text = statusLine("e-ink interface " + (if (eink.available) "available" else "NOT available")) }
+        root.addView(einkStatus)
 
         status = mono(12f)
         logView = mono(11f)
@@ -132,10 +170,32 @@ class ProbeActivity : Activity() {
 
     private fun cycleMode() = selectMode((modeIndex + 1) % 3)
 
-    private fun rateMode(n: Int) {
-        stats.ratings[pen.modeName] = n
-        log("rated ${pen.modeName} = $n")
+    private fun statusLine(last: String) =
+        "eink now=${EinkController.nameOf(eink.readMode())} original=${EinkController.nameOf(eink.original)} | $last"
+
+    private fun cycleFast() {
+        cancelFast()
+        presetIndex = (presetIndex + 1) % presets.size
+        fastButton.text = "Fast ink: " + presets[presetIndex].first
+        if (presetIndex == 0) eink.restore { einkStatus.text = statusLine(it) }
+        else einkStatus.text = statusLine("fast ink armed: ${presets[presetIndex].first} (changes mode while the pen touches)")
     }
+
+    private fun cancelFast() {
+        ui.removeCallbacks(settleToQuality)
+        inFast = false
+    }
+
+    private fun rateMode(n: Int) {
+        val display = if (presetIndex != 0) "fast ink ${presets[presetIndex].first}" else "eink=" + EinkController.nameOf(eink.readMode())
+        val key = "${pen.modeName} | $display"
+        stats.ratings[key] = n
+        log("rated $key = $n")
+    }
+
+    // The e-ink mode is system-wide, so always hand it back when we leave the foreground.
+    override fun onPause() { cancelFast(); eink.restoreNow(); super.onPause() }
+    override fun onDestroy() { cancelFast(); eink.restoreNow(); super.onDestroy() }
 
     // ---- input: everything is observed here, before any view sees it --------------------------
 
@@ -143,7 +203,27 @@ class ProbeActivity : Activity() {
         // Taps on the test panel's own buttons must not be counted as part of a test step.
         stats.muted = testPanel.visibility == View.VISIBLE && ev.y > testPanel.height - 260
         log(stats.onMotion(ev, "touch"))
+        handleFastInk(ev)
         return super.dispatchTouchEvent(ev)
+    }
+
+    /** Pen down -> fast waveform. Pen up and still for a moment -> clean waveform. */
+    private fun handleFastInk(ev: MotionEvent) {
+        val preset = presets[presetIndex]
+        val fast = preset.second ?: return
+        if (testPanel.visibility == View.VISIBLE || reportPanel.visibility == View.VISIBLE) return
+        val tool = ev.getToolType(0)
+        if (tool != MotionEvent.TOOL_TYPE_STYLUS && tool != MotionEvent.TOOL_TYPE_ERASER && tool != 6) return
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                ui.removeCallbacks(settleToQuality)
+                if (!inFast) { inFast = true; eink.set(fast, "pen down") { einkStatus.text = statusLine(it) } }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                ui.removeCallbacks(settleToQuality)
+                ui.postDelayed(settleToQuality, 700)
+            }
+        }
     }
 
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
@@ -278,8 +358,9 @@ class ProbeActivity : Activity() {
         reportText.text = "building report (scanning system files, a few seconds)..."
         val testsText = runner.reportText()
         Thread {
-            val body = DeviceReport.build(this, stats, testsText)
-            val header = "Ink Probe v0.2 report ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}\n"
+            val lab = "interface available=${eink.available} original=${EinkController.nameOf(eink.original)} now=${EinkController.nameOf(eink.readMode())}\n" + eink.historyText()
+            val body = DeviceReport.build(this, stats, testsText, lab)
+            val header = "Ink Probe v0.4 report ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}\n"
             val props = DeviceReport.fullProps()
             lastReport = header + body + "\n==== FULL getprop ====\n" + props
             val saved = save(lastReport, props)
