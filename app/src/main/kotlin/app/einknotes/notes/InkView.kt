@@ -4,23 +4,39 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
+import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
+import android.graphics.RectF
+import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
-import android.os.SystemClock
 import java.util.concurrent.Executors
-import kotlin.math.ceil
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
+/** Pen options the user can change. Saved by the activity. */
+class ToolSettings {
+    var penWidth = 1.0f
+    var penGray = 0
+    var hlWidth = 1.0f
+    var hlGray = 170
+    var calWidth = 1.0f
+    var calGray = 0
+    var calAngle = (Math.PI / 2).toFloat()
+    var calFlat = 0.75f
+}
+
 /**
- * One notebook page on screen. Everything committed (paper + strokes) lives in a single bitmap that is
- * only rebuilt when the page, zoom, pan, erase or undo changes. New ink is drawn straight onto that
- * bitmap one small piece at a time, so each pen sample only repaints a few pixels. That keeps e-ink
- * updates small, which is what makes writing feel fast.
+ * One notebook page on screen. Everything committed (paper, PDF, items) lives in a single bitmap that is
+ * only rebuilt when the page, zoom, pan, erase, undo or a selection drag changes. New ink is drawn straight
+ * onto that bitmap one small piece at a time, so each pen sample only repaints a few pixels. That keeps
+ * e-ink updates small, which is what makes writing feel fast.
  */
 class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary, private val host: Host) : View(context) {
 
@@ -29,8 +45,10 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         fun onPenDown()
         /** Pen left the glass: switch back to a clean waveform soon. */
         fun onPenUp()
-        /** Strokes, pages or paper changed: save, refresh labels and the undo buttons. */
+        /** Items, pages or paper changed: save, refresh labels and the undo buttons. */
         fun onDocumentChanged()
+        /** The selection appeared, changed or went away. */
+        fun onSelectionChanged()
     }
 
     // ---- state -------------------------------------------------------------------------------
@@ -40,18 +58,11 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     var tool = Tool.PEN
     /** What the pen's side button does while it is held. */
     var sideButtonTool = Tool.ERASER
-    /** Until this time (uptimeMillis) "Virtual" pen input is treated as the firmware's fake page-turn swipe. */
-    private var ignoreVirtualUntil = 0L
-
-    /** Called when a volume button is pressed: the firmware then injects a fake swipe from a "Virtual" device. */
-    fun ignoreVirtualFor(ms: Long) { ignoreVirtualUntil = android.os.SystemClock.uptimeMillis() + ms }
-
-    fun describe(): String =
-        "page=${pageIndex + 1}/${note.pages.size} strokes=${page.strokes.size} tool=$tool zoomIndex=$zoomIndex scale=${"%.3f".format(scale)} " +
-            "paper=${page.paper} undo=${undoStack.size} redo=${redoStack.size} view=${width}x${height}"
+    val settings = ToolSettings()
 
     val page: PageData get() = note.pages[pageIndex]
 
+    private val renderer = PageRenderer()
     private val zoomSteps = floatArrayOf(1f, 1.5f, 2f, 3f)
     var zoomIndex = 0
         private set
@@ -72,17 +83,6 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private var bgTy = 0f
     private var bgToken = 0
 
-    private val inkPaint = Paint().apply {
-        isAntiAlias = true
-        color = Color.BLACK
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-    }
-    private val linePaint = Paint().apply { color = Color.rgb(190, 190, 190); strokeWidth = 1.5f; isAntiAlias = false }
-    private val borderPaint = Paint().apply { color = Color.rgb(120, 120, 120); style = Paint.Style.STROKE; strokeWidth = 2f }
-    private val dotPaint = Paint().apply { color = Color.rgb(150, 150, 150); isAntiAlias = true }
-
     // undo / redo
     private val undoStack = ArrayList<Cmd>()
     private val redoStack = ArrayList<Cmd>()
@@ -90,10 +90,13 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     val canRedo get() = redoStack.isNotEmpty()
 
     // the stroke being written right now
-    private var live: Smoother? = null
+    private var brush = Brush.PEN
+    private var painter: PageRenderer.StrokePainter? = null
+    private var hlBase: Bitmap? = null
     private val liveXs = FloatList()
     private val liveYs = FloatList()
     private val livePs = FloatList()
+    private var writing = false
     private var lastPressure = 0f
     private var lastVx = 0f
     private var lastVy = 0f
@@ -102,7 +105,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private var erasing = false
     private var eraseLastX = 0f
     private var eraseLastY = 0f
-    private val erased = ArrayList<Pair<Int, Stroke>>()
+    private val erased = ArrayList<Pair<Int, Item>>()
     private var rebuildPending = false
 
     // hand (pan) gesture
@@ -111,13 +114,47 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private var panLastY = 0f
     private var lastPanRebuild = 0L
 
+    // selection
+    val selection = ArrayList<Item>()
+    val hasSelection get() = selection.isNotEmpty()
+    private enum class SelMode { NONE, LASSO, MOVE, SCALE }
+    private var selMode = SelMode.NONE
+    private val lasso = Path()
+    private val lassoPts = FloatList()
+    private var selLayer: Bitmap? = null
+    private val dragMatrix = Matrix()       // preview of the drag, in view coordinates
+    private var dragStartX = 0f
+    private var dragStartY = 0f
+    private var anchorX = 0f
+    private var anchorY = 0f
+    private var startDist = 1f
+    private val selDash = Paint().apply {
+        style = Paint.Style.STROKE; color = Color.BLACK; strokeWidth = 3f
+        pathEffect = DashPathEffect(floatArrayOf(14f, 10f), 0f); isAntiAlias = false
+    }
+    private val handlePaint = Paint().apply { style = Paint.Style.FILL; color = Color.BLACK }
+    private val handleHole = Paint().apply { style = Paint.Style.FILL; color = Color.WHITE }
+
     /** Area drawn since the panel last got a "clean" pass, in view pixels. Used by the polish step. */
     private var polish: Rect? = null
 
-    // ---- public actions ----------------------------------------------------------------------
+    private val debuggable = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+    /** Until this time (uptimeMillis) "Virtual" pen input is treated as the firmware's fake page-turn swipe. */
+    private var ignoreVirtualUntil = 0L
+
+    /** Called when a volume button is pressed: the firmware then injects a fake swipe from a "Virtual" device. */
+    fun ignoreVirtualFor(ms: Long) { ignoreVirtualUntil = SystemClock.uptimeMillis() + ms }
+
+    fun describe(): String =
+        "page=${pageIndex + 1}/${note.pages.size} items=${page.items.size} tool=$tool zoomIndex=$zoomIndex scale=${"%.3f".format(scale)} " +
+            "paper=${page.paper} undo=${undoStack.size} redo=${redoStack.size} selected=${selection.size} view=${width}x${height}"
+
+    // ---- page operations ---------------------------------------------------------------------
 
     fun goToPage(i: Int) {
         if (i !in note.pages.indices || i == pageIndex) return
+        clearSelection()
         pageIndex = i
         fitToView(keepZoom = true)
         transformChanged()
@@ -125,6 +162,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     }
 
     fun addPageAfterCurrent() {
+        clearSelection()
         note.pages.add(pageIndex + 1, PageData(if (page.isPdf) Paper.BLANK else page.paper))
         pageIndex += 1
         fitToView(keepZoom = false)
@@ -136,6 +174,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     /** Puts [list] after the current page and jumps to the first of them. */
     fun insertPagesAfterCurrent(list: List<PageData>) {
         if (list.isEmpty()) return
+        clearSelection()
         note.pages.addAll(pageIndex + 1, list)
         pageIndex += 1
         fitToView(keepZoom = false)
@@ -146,6 +185,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     /** Deletes the current page (a lone page is replaced by an empty one). Its undo history goes with it. */
     fun deleteCurrentPage() {
+        clearSelection()
         val removed = page
         if (note.pages.size == 1) note.pages[0] = PageData()
         else {
@@ -187,11 +227,15 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         rebuild()
     }
 
+    // ---- undo / redo -------------------------------------------------------------------------
+
     fun undo() {
         val cmd = undoStack.removeLastOrNull() ?: return
+        clearSelection()
         when (cmd) {
-            is Cmd.Add -> cmd.page.strokes.remove(cmd.stroke)
-            is Cmd.Remove -> for ((idx, s) in cmd.removed.asReversed()) cmd.page.strokes.add(min(idx, cmd.page.strokes.size), s)
+            is Cmd.Add -> for (added in cmd.items) cmd.page.items.removeAll { x -> x === added }
+            is Cmd.Remove -> for ((idx, item) in cmd.removed.asReversed()) cmd.page.items.add(min(idx, cmd.page.items.size), item)
+            is Cmd.Transform -> { val inv = Matrix(); cmd.m.invert(inv); for (moved in cmd.items) moved.transform(inv) }
         }
         redoStack.add(cmd)
         showPageOf(cmd)
@@ -199,18 +243,69 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     fun redo() {
         val cmd = redoStack.removeLastOrNull() ?: return
+        clearSelection()
         when (cmd) {
-            is Cmd.Add -> cmd.page.strokes.add(cmd.stroke)
-            is Cmd.Remove -> for ((idx, _) in cmd.removed) if (idx < cmd.page.strokes.size) cmd.page.strokes.removeAt(idx)
+            is Cmd.Add -> cmd.page.items.addAll(cmd.items)
+            is Cmd.Remove -> for ((idx, _) in cmd.removed) if (idx < cmd.page.items.size) cmd.page.items.removeAt(idx)
+            is Cmd.Transform -> for (moved in cmd.items) moved.transform(cmd.m)
         }
         undoStack.add(cmd)
         showPageOf(cmd)
     }
 
+    private fun push(cmd: Cmd) { undoStack.add(cmd); redoStack.clear() }
+
     /** The area that needs a clean repaint after fast writing, or null. Resets it. */
     fun takePolishRect(): Rect? { val r = polish; polish = null; return r }
 
     fun repaintAll() { rebuild() }
+
+    // ---- selection actions -------------------------------------------------------------------
+
+    fun clearSelection() {
+        if (selection.isEmpty() && selMode == SelMode.NONE) return
+        val wasDragging = selMode == SelMode.MOVE || selMode == SelMode.SCALE
+        selection.clear(); selMode = SelMode.NONE; selLayer?.recycle(); selLayer = null
+        lasso.reset(); lassoPts.clear()
+        if (wasDragging) rebuild() else invalidate()
+        host.onSelectionChanged()
+    }
+
+    fun selectAll() {
+        clearSelection()
+        selection.addAll(page.items)
+        rebuild(); host.onSelectionChanged()
+    }
+
+    fun deleteSelection() {
+        if (selection.isEmpty()) return
+        val removed = ArrayList<Pair<Int, Item>>()
+        for (item in selection.toList()) {
+            val idx = page.items.indexOfFirst { it === item }
+            if (idx >= 0) { removed.add(idx to item); page.items.removeAt(idx) }
+        }
+        selection.clear()
+        if (removed.isNotEmpty()) { push(Cmd.Remove(page, removed)); host.onDocumentChanged() }
+        rebuild(); host.onSelectionChanged()
+    }
+
+    /** Copies of the selected items, for the clipboard. */
+    fun copySelection(): List<Item> = selection.map { it.copy() }
+
+    /** Adds [items] to the page (shifted a little so they do not hide the originals) and selects them. */
+    fun paste(items: List<Item>, offset: Float = 40f) {
+        if (items.isEmpty()) return
+        clearSelection()
+        val fresh = items.map { it.copy() }
+        val m = Matrix().apply { setTranslate(offset, offset) }
+        for (it in fresh) it.transform(m)
+        page.items.addAll(fresh)
+        push(Cmd.Add(page, fresh))
+        selection.addAll(fresh)
+        host.onDocumentChanged(); rebuild(); host.onSelectionChanged()
+    }
+
+    fun duplicateSelection() { paste(copySelection()) }
 
     // ---- layout / transform ------------------------------------------------------------------
 
@@ -249,9 +344,25 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     override fun onDraw(canvas: Canvas) {
         bitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
+        // dragged selection preview
+        val layer = selLayer
+        if (layer != null && (selMode == SelMode.MOVE || selMode == SelMode.SCALE)) canvas.drawBitmap(layer, dragMatrix, null)
+        // selection frame and handles
+        if (selection.isNotEmpty() && selMode != SelMode.LASSO) {
+            val b = selectionBoundsView()
+            if (b != null) {
+                if (selMode == SelMode.MOVE || selMode == SelMode.SCALE) dragMatrix.mapRect(b)
+                canvas.drawRect(b, selDash)
+                for ((hx, hy) in corners(b)) {
+                    canvas.drawRect(hx - 15f, hy - 15f, hx + 15f, hy + 15f, handlePaint)
+                    canvas.drawRect(hx - 9f, hy - 9f, hx + 9f, hy + 9f, handleHole)
+                }
+            }
+        }
+        if (selMode == SelMode.LASSO) canvas.drawPath(lasso, selDash)
     }
 
-    /** Redraws paper and every stroke into the bitmap, then repaints the whole view. */
+    /** Redraws paper, PDF and every item into the bitmap, then repaints the whole view. */
     private fun rebuild() {
         val c = bmpCanvas ?: return
         rebuildPending = false
@@ -260,10 +371,18 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             val b = bgBitmap
             // A background rendered for an earlier pan position is still useful: slide it into place until the sharp one arrives.
             if (b != null && bgKey == "${page.pdfFile}#${page.pdfPage}" && bgScale == scale) c.drawBitmap(b, tx - bgTx, ty - bgTy, null)
-            drawBorder(c)
-        } else drawPaper(c)
-        for (s in page.strokes) drawStroke(c, s)
+            renderer.drawBorder(c, page, scale, tx, ty)
+        } else renderer.drawPaper(c, page, scale, tx, ty)
+        // while the selection is being dragged it is drawn as a separate layer
+        val hide = if (selMode == SelMode.MOVE || selMode == SelMode.SCALE) selection else null
+        renderer.drawItems(c, page, scale, tx, ty, hide)
         invalidate()
+    }
+
+    private fun scheduleRebuild() {
+        if (rebuildPending) return
+        rebuildPending = true
+        postDelayed({ if (rebuildPending) rebuild() }, 90)
     }
 
     /** The page moved, zoomed or changed: the PDF background needs rendering again. */
@@ -291,122 +410,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         }
     }
 
-    private fun drawBorder(c: Canvas) {
-        c.drawRect(tx, ty, tx + page.w * scale, ty + page.h * scale, borderPaint)
-    }
-
-    private fun scheduleRebuild() {
-        if (rebuildPending) return
-        rebuildPending = true
-        postDelayed({ if (rebuildPending) rebuild() }, 90)
-    }
-
-    private fun drawPaper(c: Canvas) {
-        val l = tx; val t = ty; val r = tx + page.w * scale; val b = ty + page.h * scale
-        val step = 64f * scale
-        when (page.paper) {
-            Paper.BLANK -> { }
-            Paper.RULED -> {
-                var y = t + 120f * scale
-                while (y < b - 20f * scale) { c.drawLine(l + 40f * scale, y, r - 40f * scale, y, linePaint); y += step }
-            }
-            Paper.GRID -> {
-                var y = t + step
-                while (y < b) { c.drawLine(l, y, r, y, linePaint); y += step }
-                var x = l + step
-                while (x < r) { c.drawLine(x, t, x, b, linePaint); x += step }
-            }
-            Paper.DOTS -> {
-                var y = t + step
-                while (y < b) {
-                    var x = l + step
-                    while (x < r) { c.drawCircle(x, y, 2.2f * max(scale, 0.6f), dotPaint); x += step }
-                    y += step
-                }
-            }
-        }
-        c.drawRect(l, t, r, b, borderPaint)
-    }
-
-    private fun drawStroke(c: Canvas, s: Stroke) {
-        val sm = Smoother(c)
-        for (i in 0 until s.n) sm.add(tx + s.xs[i] * scale, ty + s.ys[i] * scale, penWidthFor(s.ps[i]) * scale)
-        sm.finish()
-    }
-
-    /**
-     * Turns a stream of points into smooth, variable-width ink. Between the midpoints of neighbouring
-     * samples it draws a curve whose control point is the sample itself (the standard quadratic
-     * smoothing). It is used both for live ink and for redrawing saved strokes, so they look identical.
-     */
-    private inner class Smoother(val canvas: Canvas) {
-        private var count = 0
-        private var ex = 0f; private var ey = 0f; private var ew = 0f   // where drawing has reached
-        private var cx = 0f; private var cy = 0f; private var cw = 0f   // latest raw point
-        var dirty: Rect? = null
-
-        fun add(x: Float, y: Float, w: Float) {
-            if (count == 0) {
-                cx = x; cy = y; cw = w; ex = x; ey = y; ew = w
-                inkPaint.strokeWidth = max(w, 1.2f)
-                canvas.drawPoint(x, y, inkPaint)
-                grow(x, y, w)
-            } else {
-                val mx = (cx + x) / 2f; val my = (cy + y) / 2f; val mw = (cw + w) / 2f
-                if (count == 1) line(ex, ey, ew, mx, my, mw) else quad(ex, ey, ew, cx, cy, mx, my, mw)
-                ex = mx; ey = my; ew = mw; cx = x; cy = y; cw = w
-            }
-            count++
-        }
-
-        fun finish() { if (count >= 2) line(ex, ey, ew, cx, cy, cw) }
-
-        private fun line(x0: Float, y0: Float, w0: Float, x1: Float, y1: Float, w1: Float) {
-            val len = dist(x0, y0, x1, y1)
-            val n = min(24, (len / 5f).toInt() + 1)
-            var px = x0; var py = y0; var pw = w0
-            for (i in 1..n) {
-                val t = i / n.toFloat()
-                val x = x0 + (x1 - x0) * t; val y = y0 + (y1 - y0) * t; val w = w0 + (w1 - w0) * t
-                seg(px, py, pw, x, y, w); px = x; py = y; pw = w
-            }
-        }
-
-        private fun quad(x0: Float, y0: Float, w0: Float, qx: Float, qy: Float, x2: Float, y2: Float, w2: Float) {
-            val len = dist(x0, y0, qx, qy) + dist(qx, qy, x2, y2)
-            val n = min(30, ceil(len / 3f).toInt().coerceAtLeast(1))
-            var px = x0; var py = y0; var pw = w0
-            for (i in 1..n) {
-                val t = i / n.toFloat(); val u = 1f - t
-                val x = u * u * x0 + 2f * u * t * qx + t * t * x2
-                val y = u * u * y0 + 2f * u * t * qy + t * t * y2
-                val w = w0 + (w2 - w0) * t
-                seg(px, py, pw, x, y, w); px = x; py = y; pw = w
-            }
-        }
-
-        private fun seg(x0: Float, y0: Float, w0: Float, x1: Float, y1: Float, w1: Float) {
-            val w = max((w0 + w1) / 2f, 1.2f)
-            inkPaint.strokeWidth = w
-            canvas.drawLine(x0, y0, x1, y1, inkPaint)
-            grow(x0, y0, w); grow(x1, y1, w)
-        }
-
-        private fun grow(x: Float, y: Float, w: Float) {
-            val pad = (w / 2f).toInt() + 2
-            val r = Rect(x.toInt() - pad, y.toInt() - pad, x.toInt() + pad, y.toInt() + pad)
-            dirty = dirty?.also { it.union(r) } ?: r
-        }
-
-        private fun dist(ax: Float, ay: Float, bx: Float, by: Float): Float {
-            val dx = ax - bx; val dy = ay - by
-            return sqrt(dx * dx + dy * dy)
-        }
-    }
-
     // ---- input -------------------------------------------------------------------------------
-
-    private val debuggable = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         if (debuggable && (e.actionMasked == MotionEvent.ACTION_DOWN || e.actionMasked == MotionEvent.ACTION_UP)) {
@@ -416,7 +420,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         // The firmware injects a fake swipe (device "Virtual") right after a volume button. Never draw that one.
         // Other "Virtual" pen input is real: when an accessibility service is active, Android relabels the real pen.
         val virtual = e.device?.name == "Virtual" || e.deviceId < 0
-        if (virtual && android.os.SystemClock.uptimeMillis() < ignoreVirtualUntil) return true
+        if (virtual && SystemClock.uptimeMillis() < ignoreVirtualUntil) return true
         val toolType = e.getToolType(0)
         if (toolType == MotionEvent.TOOL_TYPE_FINGER) return true   // this tablet has no finger touch; ignore strays
 
@@ -431,27 +435,30 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                 host.onPenDown()
                 lastVx = e.x; lastVy = e.y
                 when (active) {
-                    Tool.PEN -> beginStroke(e.x, e.y, e.pressure)
-                    Tool.ERASER -> { erasing = true; erased.clear(); eraseLastX = e.x; eraseLastY = e.y; eraseAt(e.x, e.y) }
+                    Tool.PEN, Tool.HIGHLIGHTER, Tool.CALLIGRAPHY -> { clearSelection(); beginStroke(active, e.x, e.y, e.pressure) }
+                    Tool.ERASER -> { clearSelection(); erasing = true; erased.clear(); eraseLastX = e.x; eraseLastY = e.y; eraseAt(e.x, e.y) }
                     Tool.HAND -> { panning = true; panLastX = e.x; panLastY = e.y }
+                    Tool.SELECT -> beginSelectGesture(e.x, e.y)
+                    Tool.SHAPE -> { clearSelection(); beginStroke(Tool.PEN, e.x, e.y, e.pressure) }
                 }
             }
             MotionEvent.ACTION_MOVE -> {
-                for (i in 0 until e.historySize) move(active, e.getHistoricalX(i), e.getHistoricalY(i), e.getHistoricalPressure(i))
-                move(active, e.x, e.y, e.pressure)
+                for (i in 0 until e.historySize) move(e.getHistoricalX(i), e.getHistoricalY(i), e.getHistoricalPressure(i))
+                move(e.x, e.y, e.pressure)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 when {
-                    live != null -> {
+                    writing -> {
                         // The lift-off position is part of the stroke: without it every line ends a little short.
                         if (e.actionMasked == MotionEvent.ACTION_UP) {
-                            for (i in 0 until e.historySize) move(active, e.getHistoricalX(i), e.getHistoricalY(i), e.getHistoricalPressure(i))
+                            for (i in 0 until e.historySize) move(e.getHistoricalX(i), e.getHistoricalY(i), e.getHistoricalPressure(i))
                             finalPoint(e.x, e.y)
                         }
                         endStroke()
                     }
                     erasing -> endErase()
                     panning -> { panning = false; transformChanged(); rebuild() }
+                    selMode != SelMode.NONE -> endSelectGesture(e.x, e.y)
                 }
                 host.onPenUp()
             }
@@ -459,9 +466,9 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         return true
     }
 
-    private fun move(active: Tool, x: Float, y: Float, rawPressure: Float) {
+    private fun move(x: Float, y: Float, rawPressure: Float) {
         when {
-            live != null && active == Tool.PEN -> addStrokePoint(x, y, rawPressure)
+            writing -> addStrokePoint(x, y, rawPressure)
             erasing -> eraseAlong(x, y)
             panning -> {
                 tx += x - panLastX; ty += y - panLastY
@@ -470,19 +477,31 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                 val now = System.currentTimeMillis()
                 if (now - lastPanRebuild > 140) { lastPanRebuild = now; rebuild() }
             }
+            selMode != SelMode.NONE -> moveSelectGesture(x, y)
         }
     }
 
     // ---- writing -----------------------------------------------------------------------------
 
-    private fun beginStroke(x: Float, y: Float, rawPressure: Float) {
+    private fun beginStroke(active: Tool, x: Float, y: Float, rawPressure: Float) {
         val c = bmpCanvas ?: return
+        brush = when (active) { Tool.HIGHLIGHTER -> Brush.HIGHLIGHTER; Tool.CALLIGRAPHY -> Brush.CALLIGRAPHY; else -> Brush.PEN }
         liveXs.clear(); liveYs.clear(); livePs.clear()
-        live = Smoother(c)
+        writing = true
         lastPressure = normalisePressure(rawPressure)
+        if (brush == Brush.HIGHLIGHTER) {
+            // Highlighter is redrawn as one path each time; keep a clean copy to restore underneath it.
+            hlBase = bitmap?.copy(Bitmap.Config.ARGB_8888, false)
+            painter = null
+        } else {
+            painter = renderer.newPainter(c, brush, grayFor(brush), widthFor(brush), settings.calAngle, settings.calFlat, scale)
+        }
         pushPoint(x, y, lastPressure)
         flushLive()
     }
+
+    private fun grayFor(b: Brush) = when (b) { Brush.HIGHLIGHTER -> settings.hlGray; Brush.CALLIGRAPHY -> settings.calGray; else -> settings.penGray }
+    private fun widthFor(b: Brush) = when (b) { Brush.HIGHLIGHTER -> settings.hlWidth; Brush.CALLIGRAPHY -> settings.calWidth; else -> settings.penWidth }
 
     private fun addStrokePoint(x: Float, y: Float, rawPressure: Float) {
         // Ignore jitter: samples closer than one pixel add nothing but cost time.
@@ -505,27 +524,45 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     private fun pushPoint(x: Float, y: Float, p: Float) {
         liveXs.add((x - tx) / scale); liveYs.add((y - ty) / scale); livePs.add(p)
-        live?.add(x, y, penWidthFor(p) * scale)
+        painter?.add(x, y, p)
     }
 
     /** Repaints just the little area the newest pieces of ink touched. */
     private fun flushLive() {
-        val d = live?.dirty ?: return
-        live?.dirty = null
+        if (brush == Brush.HIGHLIGHTER) { updateHighlighter(); return }
+        val d = painter?.dirty ?: return
+        painter?.dirty = null
         invalidate(d)
         polish = polish?.also { it.union(d) } ?: Rect(d)
     }
 
+    private fun updateHighlighter() {
+        val c = bmpCanvas ?: return
+        val base = hlBase ?: return
+        val xs = liveXs.toArray(); val ys = liveYs.toArray()
+        val path = renderer.highlighterPath(xs, ys, xs.size, scale, tx, ty)
+        val b = RectF(); path.computeBounds(b, true)
+        val widthPx = HIGHLIGHTER_WIDTH * settings.hlWidth * scale
+        val pad = (widthPx / 2f).toInt() + 4
+        val region = Rect(b.left.toInt() - pad, b.top.toInt() - pad, b.right.toInt() + pad, b.bottom.toInt() + pad)
+        region.intersect(0, 0, base.width, base.height)
+        c.drawBitmap(base, region, region, null)                    // restore what was under the stroke so far
+        renderer.drawHighlighter(c, path, settings.hlGray, widthPx, xs.size == 1)
+        invalidate(region)
+        polish = polish?.also { it.union(region) } ?: Rect(region)
+    }
+
     private fun endStroke() {
-        val sm = live ?: return
-        sm.finish()
+        painter?.finish()
         flushLive()
-        live = null
+        painter = null
+        writing = false
+        hlBase?.recycle(); hlBase = null
         if (liveXs.size >= 1) {
-            val s = Stroke(Tool.PEN, liveXs.toArray(), liveYs.toArray(), livePs.toArray())
-            page.strokes.add(s)
-            undoStack.add(Cmd.Add(page, s))
-            redoStack.clear()
+            val s = Stroke(brush, grayFor(brush), widthFor(brush), liveXs.toArray(), liveYs.toArray(), livePs.toArray(),
+                settings.calAngle, settings.calFlat)
+            page.items.add(s)
+            push(Cmd.Add(page, listOf(s)))
             host.onDocumentChanged()
         }
     }
@@ -544,7 +581,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private fun eraseAt(vx: Float, vy: Float) {
         val px = (vx - tx) / scale; val py = (vy - ty) / scale
         val r = 18f / scale
-        val list = page.strokes
+        val list = page.items
         var removedAny = false
         for (i in list.indices.reversed()) {
             val s = list[i]
@@ -560,11 +597,111 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private fun endErase() {
         erasing = false
         if (erased.isNotEmpty()) {
-            undoStack.add(Cmd.Remove(page, erased.toList()))
-            redoStack.clear()
+            push(Cmd.Remove(page, erased.toList()))
             erased.clear()
             rebuild()
             host.onDocumentChanged()
+        }
+    }
+
+    // ---- selecting, moving and resizing ------------------------------------------------------
+
+    private fun selectionBoundsView(): RectF? {
+        if (selection.isEmpty()) return null
+        var l = Float.MAX_VALUE; var t = Float.MAX_VALUE; var r = -Float.MAX_VALUE; var b = -Float.MAX_VALUE
+        for (it in selection) { l = min(l, it.minX); t = min(t, it.minY); r = max(r, it.maxX); b = max(b, it.maxY) }
+        return RectF(tx + l * scale - 6f, ty + t * scale - 6f, tx + r * scale + 6f, ty + b * scale + 6f)
+    }
+
+    private fun corners(b: RectF) = listOf(b.left to b.top, b.right to b.top, b.right to b.bottom, b.left to b.bottom)
+
+    private fun beginSelectGesture(x: Float, y: Float) {
+        dragStartX = x; dragStartY = y
+        val b = selectionBoundsView()
+        if (b != null) {
+            // grabbing a corner resizes (the opposite corner stays put)
+            val cs = corners(b)
+            for ((i, c) in cs.withIndex()) {
+                if (hypot(x - c.first, y - c.second) < 45f) {
+                    val opp = cs[(i + 2) % 4]
+                    anchorX = opp.first; anchorY = opp.second
+                    startDist = max(hypot(x - anchorX, y - anchorY), 1f)
+                    startDrag(SelMode.SCALE)
+                    return
+                }
+            }
+            // grabbing inside the frame moves everything
+            if (b.contains(x, y)) { startDrag(SelMode.MOVE); return }
+        }
+        // otherwise start a new lasso
+        clearSelection()
+        selMode = SelMode.LASSO
+        lasso.reset(); lasso.moveTo(x, y)
+        lassoPts.clear(); lassoPts.add(x); lassoPts.add(y)
+    }
+
+    private fun startDrag(mode: SelMode) {
+        selMode = mode
+        dragMatrix.reset()
+        // render the selected items once into their own layer so dragging is just moving a bitmap
+        val layer = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val c = Canvas(layer)
+        for (it in selection) renderer.drawItem(c, it, scale, tx, ty)
+        selLayer = layer
+        rebuild()
+    }
+
+    private fun moveSelectGesture(x: Float, y: Float) {
+        when (selMode) {
+            SelMode.LASSO -> {
+                lasso.lineTo(x, y); lassoPts.add(x); lassoPts.add(y)
+                invalidate()
+            }
+            SelMode.MOVE -> { dragMatrix.setTranslate(x - dragStartX, y - dragStartY); invalidate() }
+            SelMode.SCALE -> {
+                val f = (hypot(x - anchorX, y - anchorY) / startDist).coerceIn(0.2f, 6f)
+                dragMatrix.setScale(f, f, anchorX, anchorY); invalidate()
+            }
+            SelMode.NONE -> { }
+        }
+    }
+
+    private fun endSelectGesture(x: Float, y: Float) {
+        when (selMode) {
+            SelMode.LASSO -> {
+                val pts = lassoPts.toArray()
+                var l = Float.MAX_VALUE; var t = Float.MAX_VALUE; var r = -Float.MAX_VALUE; var b = -Float.MAX_VALUE
+                for (i in pts.indices step 2) { l = min(l, pts[i]); r = max(r, pts[i]); t = min(t, pts[i + 1]); b = max(b, pts[i + 1]) }
+                selection.clear()
+                if (r - l < 14f && b - t < 14f) {
+                    // a tap: pick the topmost item under the pen
+                    val px = (x - tx) / scale; val py = (y - ty) / scale
+                    page.items.lastOrNull { it.near(px, py, 14f / scale) && it.hit(px, py, 14f / scale) }?.let { selection.add(it) }
+                } else {
+                    val poly = FloatArray(pts.size)
+                    for (i in pts.indices step 2) { poly[i] = (pts[i] - tx) / scale; poly[i + 1] = (pts[i + 1] - ty) / scale }
+                    for (it in page.items) if (it.fractionInside(poly) >= 0.5f) selection.add(it)
+                }
+                selMode = SelMode.NONE
+                lasso.reset(); lassoPts.clear()
+                invalidate(); host.onSelectionChanged()
+            }
+            SelMode.MOVE, SelMode.SCALE -> {
+                // apply the previewed drag to the real items, in page coordinates
+                val vm = Matrix(dragMatrix)
+                val toView = Matrix().apply { setScale(scale, scale); postTranslate(tx, ty) }
+                val toPage = Matrix(); toView.invert(toPage)
+                val pm = Matrix(toView); pm.postConcat(vm); pm.postConcat(toPage)    // page -> view -> dragged -> page
+                if (!vm.isIdentity) {
+                    for (it in selection) it.transform(pm)
+                    push(Cmd.Transform(page, selection.toList(), pm))
+                    host.onDocumentChanged()
+                }
+                selMode = SelMode.NONE
+                selLayer?.recycle(); selLayer = null
+                rebuild(); host.onSelectionChanged()
+            }
+            SelMode.NONE -> { }
         }
     }
 }
