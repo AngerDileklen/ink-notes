@@ -18,7 +18,21 @@ class H(http.server.BaseHTTPRequestHandler):
         self.server.done = True
     def log_message(self, *a): pass
 
-s = socket.socket(); s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close()
+def lan_ip():
+    # UDP connect() sends no packet, so it works even when the internet is unreachable.
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("192.168.1.1", 80)); ip = s.getsockname()[0]; s.close()
+        if ip and not ip.startswith("127."): return ip
+    except OSError:
+        pass
+    import subprocess
+    for iface in ("en0", "en1"):
+        out = subprocess.run(["ipconfig", "getifaddr", iface], capture_output=True, text=True).stdout.strip()
+        if out: return out
+    return "MAC-IP"
+
+ip = lan_ip()
 srv = http.server.HTTPServer(("0.0.0.0", 8765), H); srv.done = False; srv.timeout = 5
 print(f"Type this into the app's address box:  http://{ip}:8765/", flush=True)
 end = time.time() + 600
