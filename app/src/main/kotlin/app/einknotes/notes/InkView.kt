@@ -9,6 +9,8 @@ import android.graphics.Rect
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
+import android.os.SystemClock
+import java.util.concurrent.Executors
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -20,7 +22,7 @@ import kotlin.math.sqrt
  * bitmap one small piece at a time, so each pen sample only repaints a few pixels. That keeps e-ink
  * updates small, which is what makes writing feel fast.
  */
-class InkView(context: Context, val note: NoteData, private val host: Host) : View(context) {
+class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary, private val host: Host) : View(context) {
 
     interface Host {
         /** Pen touched the glass: switch the panel to a fast waveform. */
@@ -60,6 +62,15 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
 
     private var bitmap: Bitmap? = null
     private var bmpCanvas: Canvas? = null
+
+    // PDF background of the current page, rendered for the current view on a worker thread
+    private val pdfExecutor = Executors.newSingleThreadExecutor()
+    private var bgBitmap: Bitmap? = null
+    private var bgKey = ""
+    private var bgScale = 0f
+    private var bgTx = 0f
+    private var bgTy = 0f
+    private var bgToken = 0
 
     private val inkPaint = Paint().apply {
         isAntiAlias = true
@@ -109,13 +120,42 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
         if (i !in note.pages.indices || i == pageIndex) return
         pageIndex = i
         fitToView(keepZoom = true)
+        transformChanged()
         rebuild()
     }
 
     fun addPageAfterCurrent() {
-        note.pages.add(pageIndex + 1, PageData(page.paper))
+        note.pages.add(pageIndex + 1, PageData(if (page.isPdf) Paper.BLANK else page.paper))
         pageIndex += 1
         fitToView(keepZoom = false)
+        transformChanged()
+        rebuild()
+        host.onDocumentChanged()
+    }
+
+    /** Puts [list] after the current page and jumps to the first of them. */
+    fun insertPagesAfterCurrent(list: List<PageData>) {
+        if (list.isEmpty()) return
+        note.pages.addAll(pageIndex + 1, list)
+        pageIndex += 1
+        fitToView(keepZoom = false)
+        transformChanged()
+        rebuild()
+        host.onDocumentChanged()
+    }
+
+    /** Deletes the current page (a lone page is replaced by an empty one). Its undo history goes with it. */
+    fun deleteCurrentPage() {
+        val removed = page
+        if (note.pages.size == 1) note.pages[0] = PageData()
+        else {
+            note.pages.removeAt(pageIndex)
+            if (pageIndex >= note.pages.size) pageIndex = note.pages.size - 1
+        }
+        undoStack.removeAll { it.page === removed }
+        redoStack.removeAll { it.page === removed }
+        fitToView(keepZoom = false)
+        transformChanged()
         rebuild()
         host.onDocumentChanged()
     }
@@ -136,12 +176,14 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
         scale = fit * zoomSteps[zoomIndex]
         tx = cx - px * scale; ty = cy - py * scale
         clampOffsets()
+        transformChanged()
         rebuild()
     }
 
     fun panBy(dxFraction: Float, dyFraction: Float) {
         tx -= dxFraction * width; ty -= dyFraction * height
         clampOffsets()
+        transformChanged()
         rebuild()
     }
 
@@ -177,12 +219,13 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
         bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         bmpCanvas = Canvas(bitmap!!)
         fitToView(keepZoom = true)
+        transformChanged()
         rebuild()
     }
 
     private fun fitToView(keepZoom: Boolean) {
         if (width <= 0 || height <= 0) return
-        fit = min(width / PAGE_W, height / PAGE_H)
+        fit = min(width / page.w, height / page.h)
         if (!keepZoom) zoomIndex = 0
         scale = fit * zoomSteps[zoomIndex]
         tx = 0f; ty = 0f
@@ -190,14 +233,14 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
     }
 
     private fun clampOffsets() {
-        val pw = PAGE_W * scale; val ph = PAGE_H * scale
+        val pw = page.w * scale; val ph = page.h * scale
         tx = if (pw <= width) (width - pw) / 2f else tx.coerceIn(width - pw, 0f)
         ty = if (ph <= height) (height - ph) / 2f else ty.coerceIn(height - ph, 0f)
     }
 
     private fun showPageOf(cmd: Cmd) {
         val idx = note.pages.indexOf(cmd.page)
-        if (idx >= 0 && idx != pageIndex) { pageIndex = idx; fitToView(keepZoom = true) }
+        if (idx >= 0 && idx != pageIndex) { pageIndex = idx; fitToView(keepZoom = true); transformChanged() }
         rebuild()
         host.onDocumentChanged()
     }
@@ -213,9 +256,43 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
         val c = bmpCanvas ?: return
         rebuildPending = false
         c.drawColor(Color.WHITE)
-        drawPaper(c)
+        if (page.isPdf) {
+            val b = bgBitmap
+            // A background rendered for an earlier pan position is still useful: slide it into place until the sharp one arrives.
+            if (b != null && bgKey == "${page.pdfFile}#${page.pdfPage}" && bgScale == scale) c.drawBitmap(b, tx - bgTx, ty - bgTy, null)
+            drawBorder(c)
+        } else drawPaper(c)
         for (s in page.strokes) drawStroke(c, s)
         invalidate()
+    }
+
+    /** The page moved, zoomed or changed: the PDF background needs rendering again. */
+    private fun transformChanged() {
+        if (!page.isPdf) return
+        val name = page.pdfFile ?: return
+        if (width <= 0 || height <= 0) return
+        val token = ++bgToken
+        val key = "$name#${page.pdfPage}"
+        val w = width; val h = height; val sc = scale; val x = tx; val y = ty; val pw = page.w; val idx = page.pdfPage
+        pdfExecutor.execute {
+            val bmp = try { Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888) } catch (_: Throwable) { null }
+            val t0 = SystemClock.uptimeMillis()
+            val ok = bmp != null && pdfs.render(name, idx, bmp, pw, sc, x, y)
+            val ms = SystemClock.uptimeMillis() - t0
+            post {
+                if (token == bgToken && ok && bmp != null) {
+                    val old = bgBitmap
+                    bgBitmap = bmp; bgKey = key; bgScale = sc; bgTx = x; bgTy = y
+                    if (debuggable) Log.d("InkView", "pdf page $idx rendered in $ms ms (${w}x$h)")
+                    if (old !== bmp) old?.recycle()
+                    rebuild()
+                } else if (bmp != null) bmp.recycle()
+            }
+        }
+    }
+
+    private fun drawBorder(c: Canvas) {
+        c.drawRect(tx, ty, tx + page.w * scale, ty + page.h * scale, borderPaint)
     }
 
     private fun scheduleRebuild() {
@@ -225,7 +302,7 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
     }
 
     private fun drawPaper(c: Canvas) {
-        val l = tx; val t = ty; val r = tx + PAGE_W * scale; val b = ty + PAGE_H * scale
+        val l = tx; val t = ty; val r = tx + page.w * scale; val b = ty + page.h * scale
         val step = 64f * scale
         when (page.paper) {
             Paper.BLANK -> { }
@@ -374,7 +451,7 @@ class InkView(context: Context, val note: NoteData, private val host: Host) : Vi
                         endStroke()
                     }
                     erasing -> endErase()
-                    panning -> { panning = false; rebuild() }
+                    panning -> { panning = false; transformChanged(); rebuild() }
                 }
                 host.onPenUp()
             }

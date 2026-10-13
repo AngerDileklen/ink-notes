@@ -1,6 +1,7 @@
 package app.einknotes.notes
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
@@ -8,6 +9,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -24,6 +26,7 @@ import android.widget.Toast
 import app.einknotes.EinkController
 import app.einknotes.ProbeActivity
 import java.io.File
+import kotlin.concurrent.thread
 
 /**
  * Ink Notes. Pen-only tablet, so everything is reachable with the pen; the hardware buttons add shortcuts.
@@ -36,6 +39,10 @@ class NotesActivity : Activity(), InkView.Host {
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var note: NoteData
     private lateinit var ink: InkView
+    private lateinit var pdfs: PdfLibrary
+    private lateinit var importPanel: LinearLayout
+    private lateinit var importText: TextView
+    private var importing = false
     private lateinit var eink: EinkController
     private val file by lazy { File(filesDir, "notes/notebook1.inkn") }
     private val prefs get() = getSharedPreferences("notes", Context.MODE_PRIVATE)
@@ -84,7 +91,8 @@ class NotesActivity : Activity(), InkView.Host {
         polish = prefs.getBoolean("polish", false)
 
         note = NoteStore.load(file)
-        ink = InkView(this, note, this)
+        pdfs = PdfLibrary(this)
+        ink = InkView(this, note, pdfs, this)
         ink.sideButtonTool = Tool.values().getOrElse(prefs.getInt("side", Tool.ERASER.ordinal)) { Tool.ERASER }
 
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
@@ -106,11 +114,100 @@ class NotesActivity : Activity(), InkView.Host {
         frame.addView(root)
         settingsPanel = buildSettings().also { it.visibility = View.GONE }
         frame.addView(settingsPanel)
+        importPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            isClickable = true
+            setPadding(60, 400, 60, 60)
+            visibility = View.GONE
+        }
+        importText = TextView(this).apply { textSize = 22f; setTextColor(Color.BLACK) }
+        importPanel.addView(importText)
+        frame.addView(importPanel)
         setContentView(frame)
 
         selectTool(Tool.PEN)
         refreshChrome()
         registerDebugControl()
+        handleIncoming(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIncoming(intent)
+    }
+
+    // ---- PDF import --------------------------------------------------------------------------
+
+    private val REQ_PDF = 41
+
+    private fun pickPdf() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/pdf"
+        }
+        try { startActivityForResult(i, REQ_PDF) }
+        catch (_: Throwable) { Toast.makeText(this, "No file picker found on this tablet", Toast.LENGTH_LONG).show() }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PDF && resultCode == RESULT_OK) data?.data?.let { importPdf(it) }
+    }
+
+    /** "Open with Ink Notes" from a file manager, or a PDF shared to the app. */
+    private fun handleIncoming(i: Intent?) {
+        i ?: return
+        val uri: Uri? = when (i.action) {
+            Intent.ACTION_VIEW -> i.data
+            Intent.ACTION_SEND -> @Suppress("DEPRECATION") i.getParcelableExtra(Intent.EXTRA_STREAM)
+            else -> null
+        }
+        if (uri != null) { i.action = null; importPdf(uri) }
+    }
+
+    /** Copies the PDF in, turns every page into a notebook page, and puts them after the current page. */
+    private fun importPdf(uri: Uri) {
+        if (importing) return
+        importing = true
+        hideSettings()
+        importText.text = "Importing PDF..."
+        importPanel.visibility = View.VISIBLE
+        thread(name = "pdf-import") {
+            try {
+                val name = pdfs.importFrom(this, uri)
+                val count = pdfs.pageCount(name)
+                val pages = ArrayList<PageData>(count)
+                for (i in 0 until count) {
+                    val (wp, hp) = pdfs.pageSize(name, i)
+                    val pg = PageData(Paper.BLANK)
+                    pg.pdfFile = name; pg.pdfPage = i
+                    pg.w = PAGE_W; pg.h = PAGE_W * hp / wp.toFloat()
+                    pages.add(pg)
+                    if (i % 10 == 0) ui.post { importText.text = "Importing PDF...\n\nreading page ${i + 1} of $count" }
+                }
+                ui.post {
+                    ink.insertPagesAfterCurrent(pages)
+                    importPanel.visibility = View.GONE
+                    importing = false
+                    Toast.makeText(this, "Imported $count pages", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Throwable) {
+                ui.post {
+                    importPanel.visibility = View.GONE
+                    importing = false
+                    Toast.makeText(this, e.message ?: "Could not import that PDF", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun confirmDeletePage() {
+        AlertDialog.Builder(this)
+            .setMessage("Delete page ${ink.pageIndex + 1} of ${note.pages.size}? Its writing goes with it.")
+            .setPositiveButton("Delete") { _, _ -> ink.deleteCurrentPage(); refreshChrome(); hideSettings() }
+            .setNegativeButton("Keep", null)
+            .show()
     }
 
     /**
@@ -136,6 +233,8 @@ class NotesActivity : Activity(), InkView.Host {
                     "zoom_out" -> ink.zoomBy(-1)
                     "add_page" -> ink.addPageAfterCurrent()
                     "save" -> save()
+                    "import_path" -> i.getStringExtra("path")?.let { importPdf(Uri.fromFile(File(it))) }
+                    "delete_page" -> { ink.deleteCurrentPage(); refreshChrome() }
                 }
                 Log.d("InkDebug", "cmd=$cmd -> ${ink.describe()} einkMode=${EinkController.nameOf(eink.readMode())}")
             }
@@ -218,6 +317,8 @@ class NotesActivity : Activity(), InkView.Host {
             refreshChrome()
         }
         for (b in listOf(inkModeBtn, polishBtn, paperBtn, sideBtn,
+            tb("Import PDF...") { pickPdf() },
+            tb("Delete this page") { confirmDeletePage() },
             tb("Full screen refresh now") { eink.fullRefresh(); hideSettings() },
             tb("Open device test tools (Probe)") { save(); startActivity(Intent(this, ProbeActivity::class.java)) },
             tb("Android 'About' screen (tap Build number 7 times)") { openAbout() },

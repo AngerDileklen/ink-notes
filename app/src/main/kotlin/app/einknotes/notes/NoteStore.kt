@@ -13,12 +13,12 @@ import java.io.FileOutputStream
  * in the middle of saving can never destroy the previous good copy.
  *
  *   "INKN" | version int | pageCount int
- *   per page:   paper int | strokeCount int
+ *   per page:   paper int | [v2: width float | height float | hasPdf byte | (pdfName utf | pdfPage int)] | strokeCount int
  *   per stroke: tool int | pointCount int | (x, y, pressure) floats...
  */
 object NoteStore {
     private const val MAGIC = 0x494E4B4E   // "INKN"
-    private const val VERSION = 1
+    private const val VERSION = 2
 
     fun save(note: NoteData, file: File) {
         file.parentFile?.mkdirs()
@@ -27,6 +27,10 @@ object NoteStore {
             out.writeInt(MAGIC); out.writeInt(VERSION); out.writeInt(note.pages.size)
             for (page in note.pages) {
                 out.writeInt(page.paper.ordinal)
+                out.writeFloat(page.w); out.writeFloat(page.h)
+                val pdf = page.pdfFile
+                out.writeByte(if (pdf != null) 1 else 0)
+                if (pdf != null) { out.writeUTF(pdf); out.writeInt(page.pdfPage) }
                 out.writeInt(page.strokes.size)
                 for (s in page.strokes) {
                     out.writeInt(s.tool.ordinal)
@@ -45,13 +49,18 @@ object NoteStore {
         return try {
             DataInputStream(BufferedInputStream(FileInputStream(file), 1 shl 16)).use { inp ->
                 require(inp.readInt() == MAGIC) { "not a notebook file" }
-                require(inp.readInt() == VERSION) { "unknown notebook version" }
+                val version = inp.readInt()
+                require(version == 1 || version == 2) { "unknown notebook version" }
                 val note = NoteData()
                 note.pages.clear()
                 val pages = inp.readInt()
                 repeat(pages) {
                     val paper = Paper.values().getOrElse(inp.readInt()) { Paper.RULED }
                     val page = PageData(paper)
+                    if (version >= 2) {
+                        page.w = inp.readFloat(); page.h = inp.readFloat()
+                        if (inp.readByte().toInt() == 1) { page.pdfFile = inp.readUTF(); page.pdfPage = inp.readInt() }
+                    }
                     val count = inp.readInt()
                     repeat(count) {
                         val tool = Tool.values().getOrElse(inp.readInt()) { Tool.PEN }

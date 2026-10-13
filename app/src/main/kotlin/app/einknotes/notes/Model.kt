@@ -70,6 +70,16 @@ class Stroke(
 
 class PageData(var paper: Paper = Paper.RULED) {
     val strokes = ArrayList<Stroke>()
+
+    /** Page size in page units. Blank pages use the tablet's proportions; PDF pages use the PDF's own. */
+    var w: Float = PAGE_W
+    var h: Float = PAGE_H
+
+    /** When set, the page background is page [pdfPage] (0-based) of this stored PDF file. */
+    var pdfFile: String? = null
+    var pdfPage: Int = 0
+
+    val isPdf get() = pdfFile != null
 }
 
 class NoteData {
