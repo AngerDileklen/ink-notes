@@ -204,6 +204,8 @@ object DeviceReport {
             out.toString()
         }
 
+        section("Vendor EinkManager: what an app can see of it (read-only)") { einkManagerInfo(ctx) }
+
         section("E-ink related strings inside vendor/system code (read-only scan)") {
             val out = StringBuilder()
             val pm = ctx.packageManager
@@ -259,6 +261,69 @@ object DeviceReport {
             }
         } catch (t: Throwable) { return "$path: scan error $t\n" }
         return "$path (${f.length() / 1024}KB): ${found.size} matches\n" + found.joinToString("\n") { "    $it" } + "\n"
+    }
+
+
+    /**
+     * The framework on this tablet contains android.os.EinkManager (a vendor addition). This lists what the
+     * runtime lets a normal app see of it, and calls ONLY zero-argument getters. It never sets any mode.
+     */
+    private fun einkManagerInfo(ctx: Context): String {
+        val out = StringBuilder()
+        // 1) the service name
+        val names = linkedSetOf<String>()
+        try {
+            val f = Context::class.java.getField("EINK_SERVICE")
+            out.append("Context.EINK_SERVICE = ${f.get(null)}\n"); names.add(f.get(null) as String)
+        } catch (t: Throwable) { out.append("Context.EINK_SERVICE: not readable ($t)\n") }
+        names.addAll(listOf("eink", "einkservice", "eink_service", "EinkService"))
+
+        // 2) the manager object
+        var manager: Any? = null
+        for (n in names) {
+            try {
+                val o = ctx.getSystemService(n)
+                out.append("getSystemService(\"$n\") -> ${o?.javaClass?.name ?: "null"}\n")
+                if (o != null && manager == null) manager = o
+            } catch (t: Throwable) { out.append("getSystemService(\"$n\") threw $t\n") }
+        }
+
+        // 3) the class itself
+        try {
+            val c = Class.forName("android.os.EinkManager")
+            out.append("class android.os.EinkManager found\n")
+            val methods = c.declaredMethods.sortedBy { it.name }
+            out.append("declared methods visible to apps: ${methods.size}\n")
+            for (m in methods) out.append("   ${m.returnType.simpleName} ${m.name}(${m.parameterTypes.joinToString { it.simpleName }})\n")
+            val fields = c.declaredFields.sortedBy { it.name }
+            out.append("declared fields visible to apps: ${fields.size}\n")
+            for (f in fields) {
+                val v = try { f.isAccessible = true; if (java.lang.reflect.Modifier.isStatic(f.modifiers)) f.get(null) else "(instance)" } catch (t: Throwable) { "(unreadable)" }
+                out.append("   ${f.type.simpleName} ${f.name} = $v\n")
+            }
+            // zero-argument getters only
+            if (manager != null) {
+                for (m in methods.filter { it.parameterTypes.isEmpty() && Regex("^(get|is)[A-Z]").containsMatchIn(it.name) }) {
+                    val r = try { m.isAccessible = true; m.invoke(manager) } catch (t: Throwable) { "threw ${t.cause ?: t}" }
+                    out.append("   CALL ${m.name}() = $r\n")
+                }
+            }
+        } catch (t: Throwable) { out.append("android.os.EinkManager: $t\n") }
+
+        // 4) the binder interface and its transaction numbers
+        for (cn in listOf("android.os.IEinkManager\$Stub", "android.os.IEinkManager")) {
+            try {
+                val c = Class.forName(cn)
+                val fs = c.declaredFields.sortedBy { it.name }
+                out.append("$cn: ${fs.size} fields, ${c.declaredMethods.size} methods\n")
+                for (f in fs) {
+                    val v = try { f.isAccessible = true; f.get(null) } catch (t: Throwable) { "?" }
+                    out.append("   ${f.name} = $v\n")
+                }
+                for (m in c.declaredMethods.sortedBy { it.name }) out.append("   m ${m.returnType.simpleName} ${m.name}(${m.parameterTypes.joinToString { it.simpleName }})\n")
+            } catch (t: Throwable) { out.append("$cn: $t\n") }
+        }
+        return out.toString()
     }
 
     fun fullProps(): String = run(arrayOf("getprop"))

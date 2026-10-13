@@ -13,11 +13,7 @@ class TestRunner {
     }
 
     val steps: List<Step> = buildList {
-        add(Step("Hover", "Hold the pen tip about 1 cm ABOVE the screen, not touching. Move it slowly for 3 seconds. Then tap Next with the pen."))
-        add(Step("Side button, pen in the air", "Keep the pen off the screen. Press and release the pen's SIDE BUTTON 3 times. Then tap Next."))
-        add(Step("Side button while writing", "HOLD the side button, draw a short line, release the button. Then tap Next."))
-        add(Step("Eraser end, light", "Flip the pen. Touch the eraser end to the screen LIGHTLY and slide it. Then tap Next."))
-        add(Step("Eraser end, hard", "Press the eraser end down HARD (feel the spring) and slide it. Then tap Next."))
+        add(Step("Key capture setup", "Tap 'Open accessibility settings' below, find 'Ink Probe keys', switch it ON and accept. Come back here. This lets the app see the nine buttons. It reads key presses only. Then tap Next."))
         for (n in 1..9) add(Step("Button $n", "Hardware button $n, counting from the TOP with the tablet upright and the buttons on the left. Press and release it once, then tap Next."))
         add(Step("Button 1 long press", "Hold button 1 for 2 seconds, release. Then tap Next."))
     }

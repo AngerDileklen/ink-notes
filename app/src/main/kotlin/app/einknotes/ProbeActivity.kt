@@ -3,6 +3,7 @@ package app.einknotes
 import android.Manifest
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -11,6 +12,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -24,8 +26,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
@@ -110,6 +110,7 @@ class ProbeActivity : Activity() {
         setContentView(frame)
 
         stats.descriptorSink = { runner.record(it) }
+        KeyBus.sink = { e -> log(stats.onKey(e, "a11y")) }
         selectMode(0)
         ui.post(refresher)
     }
@@ -172,20 +173,28 @@ class ProbeActivity : Activity() {
         p.addView(testTitle)
         p.addView(testText)
         p.addView(testLive)
+        p.addView(button("Open accessibility settings") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
         val spacer = View(this)
         p.addView(spacer, LinearLayout.LayoutParams(1, 0, 1f))
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         testNextButton = button("Next") { advanceTest() }
         bar.addView(testNextButton, weightParams(2f))
-        bar.addView(button("Stop") { runner.stop(); testPanel.visibility = View.GONE }, weightParams())
+        bar.addView(button("Stop") { stopTest() }, weightParams())
         p.addView(bar)
         return p
     }
 
     private fun startTest() {
         runner.start()
+        KeyBus.consume = true      // while testing, the buttons must not also act on the system
         testPanel.visibility = View.VISIBLE
         showStep()
+    }
+
+    private fun stopTest() {
+        KeyBus.consume = false
+        runner.stop()
+        testPanel.visibility = View.GONE
     }
 
     private fun advanceTest() {
@@ -196,7 +205,7 @@ class ProbeActivity : Activity() {
             testLive.text = ""
             testNextButton.text = "Close"
             testNextButton.setOnClickListener {
-                runner.stop(); testPanel.visibility = View.GONE
+                stopTest()
                 testNextButton.text = "Next"; testNextButton.setOnClickListener { advanceTest() }
             }
         } else showStep()
@@ -206,7 +215,7 @@ class ProbeActivity : Activity() {
         val s = runner.steps[runner.index]
         testTitle.text = "Step ${runner.index + 1}/${runner.steps.size}: ${s.title}"
         testText.text = s.instruction
-        testLive.text = "events so far in this step: 0"
+        testLive.text = "events so far in this step: 0   key capture: ${if (KeyBus.connected) "ON" else "off"}"
     }
 
     // ---- logging / status --------------------------------------------------------------------
@@ -224,8 +233,8 @@ class ProbeActivity : Activity() {
                 logDirty = false
                 logView.text = logLines.joinToString("\n")
                 status.text = "latency(app side) last=${stats.lastLatencyMs}ms avg=${"%.1f".format(stats.avgLatencyMs())}ms " +
-                    "max=${stats.latMaxMs}ms events=${stats.totalEvents}"
-                if (runner.running) testLive.text = "events so far in this step: ${runner.liveCount()}"
+                    "max=${stats.latMaxMs}ms events=${stats.totalEvents} keycapture=${if (KeyBus.connected) "ON" else "off"}"
+                if (runner.running) testLive.text = "events so far in this step: ${runner.liveCount()}   key capture: ${if (KeyBus.connected) "ON" else "off"}"
             }
             ui.postDelayed(this, 500)
         }
@@ -241,8 +250,12 @@ class ProbeActivity : Activity() {
         }
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         bar.addView(button("Back") { reportPanel.visibility = View.GONE }, weightParams())
-        bar.addView(button("Send to Mac") { sendReport() }, weightParams())
+        bar.addView(button("Send report") { sendReport(false) }, weightParams())
+        bar.addView(button("Send report + files") { sendReport(true) }, weightParams())
         p.addView(bar)
+        p.addView(mono(11f).apply {
+            text = "'+ files' also copies 3 read-only system files to your Mac for analysis (framework.jar, services.jar, hvNote.apk, about 112 MB). Nothing is changed on the tablet."
+        })
 
         urlField = EditText(this).apply {
             hint = "http://MAC-IP:8765/"
@@ -291,26 +304,41 @@ class ProbeActivity : Activity() {
         return "(could not save a file)"
     }
 
-    private fun sendReport() {
+    private fun systemFiles(): List<Pair<String, File>> {
+        val list = ArrayList<Pair<String, File>>()
+        list.add("framework.jar" to File("/system/framework/framework.jar"))
+        list.add("services.jar" to File("/system/framework/services.jar"))
+        try { list.add("hvNote.apk" to File(packageManager.getApplicationInfo("hanvon.aebr.hvnote", 0).sourceDir)) } catch (_: Throwable) { }
+        return list.filter { it.second.canRead() }
+    }
+
+    private fun sendReport(withFiles: Boolean) {
         val url = urlField.text.toString().trim()
         prefs.edit().putString("url", url).apply()
         if (url.isEmpty() || lastReport.isEmpty()) {
-            reportText.text = "Type the Mac address first (http://MAC-IP:8765/) and wait for the report to finish.\n\n$lastReport"
+            reportText.text = "Type the Mac address first (http://MAC-IP:8765/) and wait for the report to finish.\n\n${lastReport.take(40000)}"
             return
         }
-        reportText.text = "sending to $url ...\n\n${lastReport.take(60000)}"
+        val sb = StringBuilder("sending to $url ...\n")
+        fun show(extra: String = "") = ui.post { reportText.text = sb.toString() + extra + "\n" + lastReport.take(40000) }
+        show()
         Thread {
-            val result = try {
-                val c = URL(url).openConnection() as HttpURLConnection
-                c.requestMethod = "POST"
-                c.connectTimeout = 6000
-                c.readTimeout = 10000
-                c.doOutput = true
-                c.setRequestProperty("Content-Type", "text/plain; charset=utf-8")
-                c.outputStream.use { it.write(lastReport.toByteArray()) }
-                "sent, server said HTTP ${c.responseCode}"
-            } catch (t: Throwable) { "send failed: $t" }
-            ui.post { reportText.text = "$result\n\n${lastReport.take(60000)}" }
+            try {
+                sb.append("report: ").append(Uploader.postText(url, lastReport)).append('\n'); show()
+                if (withFiles) {
+                    for ((name, file) in systemFiles()) {
+                        sb.append("sending $name (${file.length() / 1048576} MB) ...\n"); show()
+                        var last = 0L
+                        val r = Uploader.postFile(url, file, name) { sent, total ->
+                            if (sent - last > 6_000_000 || sent == total) { last = sent; show("   $name ${sent / 1048576}/${total / 1048576} MB") }
+                        }
+                        sb.append("   $name: $r\n"); show()
+                    }
+                }
+                sb.append("finish: ").append(Uploader.done(url)).append('\n'); show()
+            } catch (t: Throwable) {
+                sb.append("send failed: $t\n"); show()
+            }
         }.start()
     }
 

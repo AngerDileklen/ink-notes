@@ -87,9 +87,9 @@ class Stats {
             "xy=${e.x.toInt()},${e.y.toInt()} h=${e.historySize}"
     }
 
-    fun onKey(e: KeyEvent): String {
+    fun onKey(e: KeyEvent, via: String = "app"): String {
         val dev = e.device?.name ?: "dev#${e.deviceId}"
-        val label = "${KeyEvent.keyCodeToString(e.keyCode)} scan=${e.scanCode} dev=$dev src=0x${Integer.toHexString(e.source)}"
+        val label = "$via ${KeyEvent.keyCodeToString(e.keyCode)} scan=${e.scanCode} dev=$dev src=0x${Integer.toHexString(e.source)}"
         val phase = if (e.action == KeyEvent.ACTION_DOWN) (if (e.repeatCount > 0) "repeat" else "down") else "up"
         if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) keys[label] = (keys[label] ?: 0) + 1
         if (!muted) descriptorSink?.invoke("KEY $phase $label flags=0x${Integer.toHexString(e.flags)}")

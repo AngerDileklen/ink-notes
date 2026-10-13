@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="key_service_desc">Lets Ink Probe see the tablet\'s hardware buttons so they can be tested. It reads key presses only and never reads what is on the screen.</string>
+</resources>
