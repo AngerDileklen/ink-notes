@@ -10,21 +10,29 @@
     <application
         android:allowBackup="false"
         android:icon="@android:drawable/sym_def_app_icon"
-        android:label="Ink Probe"
+        android:label="Ink Notes"
         android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
         <activity
-            android:name=".ProbeActivity"
+            android:name=".notes.NotesActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"
             android:exported="true"
-            android:windowSoftInputMode="adjustResize">
+            android:label="Ink Notes">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Device test tools, opened from Ink Notes > More. -->
+        <activity
+            android:name=".ProbeActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"
+            android:exported="false"
+            android:label="Ink Probe"
+            android:windowSoftInputMode="adjustResize" />
 
         <service
             android:name=".KeyCaptureService"
