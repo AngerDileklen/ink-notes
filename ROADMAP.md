@@ -69,7 +69,7 @@ Source: `clipbrain-ios/research/notability-teardown/REPORT-2-UX.md` (screens, to
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Data safety: never save over an unreadable notebook, synced atomic save, side-effect-free library reads, single editor per notebook, receivers/handlers cleaned up | DONE (v0.11, tested on the tablet: damaged notebook shows a restore screen and is never overwritten) |
-| 2 | E-ink UI kit: icon toolbar with width/grey wells, context bar, flat sheets instead of dialogs, paged Settings, library (favorites, recent, sort, Recently Deleted) | |
+| 2 | E-ink UI kit: icon toolbar with width/grey wells, context bar, flat sheets instead of dialogs, paged Settings, library (favorites, recent, sort, Recently Deleted) | MOSTLY DONE (v0.12: icon toolbar + wells, sheets, Settings, paged library with Recently deleted; Pages panel still uses old dialogs) |
 | 3 | Long column of pages that jumps a screen at a time; page X of N; Pointer tool | |
 | 4 | Zoom window, cosine smoothing + pressure limiter, Notability widths and pen styles, pencil, eraser priority + auto-deselect, box select + arrange/flip, playback dimming and speeds, 500 ms snap | |
 | 5 | PDF text via pdfium: find with hit highlights, highlight text lines, copy text, outline | |

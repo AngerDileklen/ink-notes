@@ -1,16 +1,13 @@
 package app.einknotes.notes
 
-import android.app.Activity
 import android.Manifest
-import android.app.AlertDialog
-import android.content.pm.PackageManager
+import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -20,16 +17,20 @@ import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
-import android.view.ViewGroup
-import android.text.InputType
-import android.widget.Button
-import android.widget.EditText
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 import app.einknotes.EinkController
 import app.einknotes.ProbeActivity
+import app.einknotes.notes.ui.EButton
+import app.einknotes.notes.ui.Eink
+import app.einknotes.notes.ui.Notice
+import app.einknotes.notes.ui.Row
+import app.einknotes.notes.ui.Sheet
+import app.einknotes.notes.ui.Well
+import app.einknotes.notes.ui.divider
+import app.einknotes.notes.ui.label
 import java.io.File
 import kotlin.concurrent.thread
 
@@ -39,10 +40,11 @@ object Clipboard {
 }
 
 /**
- * Ink Notes. Pen-only tablet, so everything is reachable with the pen; the hardware buttons add shortcuts.
+ * The notebook editor. Pen-only tablet, so everything is reachable with the pen; the hardware buttons add shortcuts.
  *
- * Buttons: Volume Up/Down turn pages (the factory settings of buttons 3 and 4). In the tablet's custom-key
- * settings you can also give buttons Zoom In/Out, arrow keys, Page Up/Down, Tab or Enter and they work here.
+ * Layout (Notability-like, drawn for e-ink): a top bar (library, title, page, undo/redo, record, more), a tool row
+ * with the active tool's quick picks ("wells": widths and greys) always visible, the page, and one context bar at the
+ * bottom that shows selection actions or audio playback. Menus are flat sheets, never animated dialogs.
  */
 class NotesActivity : Activity(), InkView.Host {
 
@@ -50,6 +52,11 @@ class NotesActivity : Activity(), InkView.Host {
         /** The editor that is open right now (at most one per notebook may live). */
         @Volatile private var live: NotesActivity? = null
         private var crashHandlerInstalled = false
+
+        /** Notability's width scale (shown 1..12) as our width multipliers: pen 2 = our 1.0, highlighter 20 = our 1.0. */
+        val WIDTH_STEPS = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f, 3f, 4f, 5f, 7.5f, 10f)
+        val PEN_GREYS = intArrayOf(0, 45, 90, 130, 170)
+        val HL_GREYS = intArrayOf(230, 210, 190, 170, 150, 130)
     }
 
     /** False until the notebook loaded and the screen was built; nothing is saved before that. */
@@ -73,40 +80,39 @@ class NotesActivity : Activity(), InkView.Host {
     private val debuggableApp get() = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
     private val prefs get() = getSharedPreferences("notes", Context.MODE_PRIVATE)
 
-    // toolbar
-    private val toolButtons = LinkedHashMap<Tool, Button>()
-    private lateinit var undoBtn: Button
-    private lateinit var redoBtn: Button
-    private lateinit var pageLabel: Button
-    private lateinit var zoomBtn: Button
-    private lateinit var editBtn: Button
-    private lateinit var recBtn: Button
-    private lateinit var playBar: LinearLayout
-    private lateinit var playPauseBtn: Button
-    private lateinit var playPosBtn: Button
-    private lateinit var replayBtn: Button
-    private var replayOn = false
-    private lateinit var settingsPanel: LinearLayout
+    // chrome
+    private lateinit var frame: FrameLayout
+    private lateinit var sheet: Sheet
+    private lateinit var notice: Notice
+    private lateinit var titleView: TextView
+    private lateinit var pageBtn: EButton
+    private lateinit var undoBtn: EButton
+    private lateinit var redoBtn: EButton
+    private lateinit var recBtn: EButton
+    private val toolButtons = LinkedHashMap<Tool, EButton>()
+    private lateinit var wellsBar: LinearLayout
+    private lateinit var contextBar: FrameLayout
     private lateinit var pagesPanel: PagesPanel
-    private lateinit var inkModeBtn: Button
-    private lateinit var polishBtn: Button
-    private lateinit var paperBtn: Button
-    private lateinit var sideBtn: Button
-    private lateinit var snapBtn: Button
-    private lateinit var devStatus: TextView
 
-    // floating bars over the page
-    private lateinit var optionsBar: LinearLayout
+    // selection bar
     private lateinit var selectionBar: LinearLayout
-    private lateinit var pasteBtn: Button
-    private lateinit var selectionButtons: List<Button>
+    private lateinit var pasteBtn: EButton
+    private lateinit var editBtn: EButton
+    private lateinit var selectionButtons: List<EButton>
+
+    // play bar
+    private lateinit var playBar: LinearLayout
+    private lateinit var playPauseBtn: EButton
+    private lateinit var playPosBtn: EButton
+    private lateinit var replayBtn: EButton
+    private var replayOn = false
 
     // fast-ink presets: (label, mode while writing, mode afterwards)
     private val presets = listOf(
-        Triple("off", null, null),
-        Triple("AutoDU > GC16", EinkController.AUTO_DU, EinkController.PART_GC16),
-        Triple("DU > GL16", EinkController.DU, EinkController.PART_GL16),
-        Triple("A2 > GL16", EinkController.A2, EinkController.PART_GL16)
+        Triple("Off", null, null),
+        Triple("AutoDU, then GC16", EinkController.AUTO_DU, EinkController.PART_GC16),
+        Triple("DU, then GL16", EinkController.DU, EinkController.PART_GL16),
+        Triple("A2, then GL16", EinkController.A2, EinkController.PART_GL16)
     )
     private var presetIndex = 1          // AutoDU > GC16 felt best on this tablet
     private var polish = false
@@ -121,18 +127,6 @@ class NotesActivity : Activity(), InkView.Host {
     }
     private val saveNow = Runnable { save() }
 
-    // option presets
-    private val widthNames = listOf("Fine", "Thin", "Normal", "Bold", "Heavy")
-    private val widthValues = listOf(0.5f, 0.75f, 1.0f, 1.5f, 2.2f)
-    private val penGrayNames = listOf("Black", "Dark", "Mid")
-    private val penGrayValues = listOf(0, 60, 115)
-    private val hlGrayNames = listOf("Light", "Medium", "Dark")
-    private val hlGrayValues = listOf(205, 170, 130)
-    private val angleNames = listOf("0", "45", "90", "135")
-    private val angleValues = listOf(0f, 0.7854f, 1.5708f, 2.3562f)
-    private val flatNames = listOf("Soft", "Medium", "Broad")
-    private val flatValues = listOf(0.5f, 0.75f, 0.95f)
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         eink = EinkController(this)
@@ -145,6 +139,7 @@ class NotesActivity : Activity(), InkView.Host {
 
         presetIndex = prefs.getInt("preset", 1).coerceIn(0, presets.size - 1)
         polish = prefs.getBoolean("polish", false)
+        if (prefs.getBoolean("keepAwake", false)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         // The library says which notebook to open (adb tests use e.g. --es notebook scratch so real notes stay untouched).
         notebookName = intent?.getStringExtra("notebook")?.filter { it.isLetterOrDigit() || it == '_' }
@@ -159,60 +154,14 @@ class NotesActivity : Activity(), InkView.Host {
         live?.let { old -> if (old !== this && old.notebookName == notebookName) { old.retired = true; old.finish() } }
         live = this
         rotateBackups()
+        getSharedPreferences("library", MODE_PRIVATE).edit().putLong("opened_$notebookName", System.currentTimeMillis()).apply()
         pdfs = PdfLibrary(this)
         ImageStore.init(this)
         ink = InkView(this, note, pdfs, this)
         ink.sideButtonTool = Tool.values().getOrElse(prefs.getInt("side", Tool.ERASER.ordinal)) { Tool.ERASER }
         loadToolSettings()
 
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
-        val row1 = row()
-        for ((tool, label) in listOf(Tool.PEN to "Pen", Tool.HIGHLIGHTER to "Marker",
-            Tool.ERASER to "Erase", Tool.SELECT to "Select", Tool.SHAPE to "Shape", Tool.TEXT to "Text", Tool.TAPE to "Tape", Tool.HAND to "Hand")) {
-            val b = tb(label) { onToolTapped(tool) }
-            toolButtons[tool] = b
-            row1.addView(b, weight())
-        }
-        undoBtn = tb("Undo") { ink.undo() }
-        redoBtn = tb("Redo") { ink.redo() }
-        row1.addView(undoBtn, weight())
-        val row2 = row()
-        pageLabel = tb("1/1") { showPages() }
-        zoomBtn = tb("Zoom") { ink.cycleZoom(); refreshChrome() }
-        recBtn = tb("Rec") { onRecTapped() }
-        for (b in listOf(tb("<") { goPage(-1) }, pageLabel, tb(">") { goPage(1) }, tb("+ Page") { ink.addPageAfterCurrent() },
-            zoomBtn, redoBtn, recBtn, tb("Refresh") { eink.fullRefresh() }, tb("More") { showSettings() })) row2.addView(b, weight())
-        root.addView(row1); root.addView(row2)
-
-        // the page, with floating bars on top so showing them never resizes (and re-renders) the page
-        val pageArea = FrameLayout(this)
-        pageArea.addView(ink, FrameLayout.LayoutParams(-1, -1))
-        optionsBar = row().apply { visibility = View.GONE; setBackgroundColor(Color.WHITE) }
-        pageArea.addView(optionsBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-        playBar = buildPlayBar().also { it.visibility = View.GONE }
-        pageArea.addView(playBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-        selectionBar = buildSelectionBar().also { it.visibility = View.GONE }
-        pageArea.addView(selectionBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
-        root.addView(pageArea, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        val frame = FrameLayout(this)
-        frame.addView(root)
-        settingsPanel = buildSettings().also { it.visibility = View.GONE }
-        frame.addView(settingsPanel)
-        pagesPanel = PagesPanel(this, note, pdfs, ink, { hidePages() }, { i -> ink.goToPage(i); hidePages(); refreshChrome() })
-        pagesPanel.visibility = View.GONE
-        frame.addView(pagesPanel)
-        importPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            isClickable = true
-            setPadding(60, 400, 60, 60)
-            visibility = View.GONE
-        }
-        importText = TextView(this).apply { textSize = 22f; setTextColor(Color.BLACK) }
-        importPanel.addView(importText)
-        frame.addView(importPanel)
-        setContentView(frame)
+        buildScreen()
 
         selectTool(Tool.PEN)
         // come back to the page you were writing on
@@ -223,33 +172,120 @@ class NotesActivity : Activity(), InkView.Host {
         ready = true
     }
 
+    // ---- screen ------------------------------------------------------------------------------
+
+    private fun buildScreen() {
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
+
+        // top bar
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(6, 4, 6, 0) }
+        top.addView(icon("back", "Library") { save(); finish() }, LinearLayout.LayoutParams(130, Eink.BAR_H))
+        titleView = label(note.title, 22f, bold = true).apply {
+            setPadding(16, 0, 16, 0); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+            setOnClickListener { renameNotebook() }
+        }
+        top.addView(titleView, LinearLayout.LayoutParams(0, -2, 1f))
+        pageBtn = EButton(this, null, "1 / 1") { showPages() }.apply { textSize = 26f }
+        top.addView(pageBtn, LinearLayout.LayoutParams(170, Eink.BAR_H - 12))
+        top.addView(icon("up", null) { goPage(-1) }, LinearLayout.LayoutParams(96, Eink.BAR_H))
+        top.addView(icon("down", null) { goPage(1) }, LinearLayout.LayoutParams(96, Eink.BAR_H))
+        undoBtn = icon("undo", null) { ink.undo() }
+        redoBtn = icon("redo", null) { ink.redo() }
+        recBtn = icon("mic", "Rec") { onRecTapped() }
+        top.addView(undoBtn, LinearLayout.LayoutParams(96, Eink.BAR_H))
+        top.addView(redoBtn, LinearLayout.LayoutParams(96, Eink.BAR_H))
+        top.addView(recBtn, LinearLayout.LayoutParams(110, Eink.BAR_H))
+        top.addView(icon("more", null) { showMore() }, LinearLayout.LayoutParams(96, Eink.BAR_H))
+        root.addView(top)
+
+        // tool row with the active tool's wells
+        val tools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(6, 0, 6, 4) }
+        for ((tool, ic, name) in listOf(
+            Triple(Tool.PEN, "pen", "Pen"), Triple(Tool.HIGHLIGHTER, "highlighter", "Marker"), Triple(Tool.ERASER, "eraser", "Eraser"),
+            Triple(Tool.SELECT, "lasso", "Select"), Triple(Tool.SHAPE, "shape", "Shape"), Triple(Tool.TEXT, "text", "Text"),
+            Triple(Tool.TAPE, "tape", "Tape"), Triple(Tool.HAND, "hand", "Hand"))) {
+            val b = icon(ic, name) { onToolTapped(tool) }
+            toolButtons[tool] = b
+            tools.addView(b, LinearLayout.LayoutParams(100, 112))
+        }
+        tools.addView(divider(), LinearLayout.LayoutParams(3, 80).apply { leftMargin = 8; rightMargin = 8 })
+        wellsBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        tools.addView(wellsBar, LinearLayout.LayoutParams(0, 112, 1f))
+        root.addView(tools)
+        root.addView(View(this).apply { setBackgroundColor(Color.BLACK) }, LinearLayout.LayoutParams(-1, 3))
+
+        // the page, with one context bar on top so showing it never resizes (and re-renders) the page
+        val pageArea = FrameLayout(this)
+        pageArea.addView(ink, FrameLayout.LayoutParams(-1, -1))
+        contextBar = FrameLayout(this).apply { setBackgroundColor(Color.WHITE); visibility = View.GONE }
+        pageArea.addView(contextBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        selectionBar = buildSelectionBar()
+        playBar = buildPlayBar()
+        root.addView(pageArea, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        frame = FrameLayout(this)
+        frame.addView(root)
+        pagesPanel = PagesPanel(this, note, pdfs, ink, { hidePages() }, { i -> ink.goToPage(i); hidePages(); refreshChrome() })
+        pagesPanel.visibility = View.GONE
+        frame.addView(pagesPanel)
+        importPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE); isClickable = true
+            setPadding(60, 400, 60, 60); visibility = View.GONE
+        }
+        importText = label("", 22f)
+        importPanel.addView(importText)
+        frame.addView(importPanel)
+        setContentView(frame)
+        sheet = Sheet(this, frame)
+        notice = Notice(frame)
+    }
+
+    private fun icon(name: String, text: String?, onClick: () -> Unit) =
+        EButton(this, name, text) { onClick() }.apply { bordered = false }
+
+    private fun say(text: String) { if (::notice.isInitialized) notice.show(text) }
+
+    /** Shows [bar] in the context slot at the bottom of the page (only one at a time), or hides the slot. */
+    private fun showContext(bar: View?) {
+        contextBar.removeAllViews()
+        if (bar == null) { contextBar.visibility = View.GONE; return }
+        (bar.parent as? android.view.ViewGroup)?.removeView(bar)
+        contextBar.addView(bar, FrameLayout.LayoutParams(-1, -2))
+        contextBar.visibility = View.VISIBLE
+    }
+
+    private fun updateContext() {
+        when {
+            AudioNotes.playing != null -> showContext(playBar)
+            ink.tool == Tool.SELECT && (ink.hasSelection || Clipboard.items.isNotEmpty()) -> showContext(selectionBar)
+            else -> showContext(null)
+        }
+    }
+
     /**
      * The notebook file exists but cannot be read. Nothing is saved over it; the person can put back one of the
      * automatic backups (the damaged file is kept next to it).
      */
     private fun showUnreadable() {
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE); setPadding(48, 120, 48, 48) }
-        box.addView(TextView(this).apply {
-            text = "This notebook could not be opened.\n\nIt has not been changed. You can put back an automatic backup below " +
-                "(the damaged copy is kept), or go back to the library."
-            textSize = 20f; setTextColor(Color.BLACK)
-        })
+        box.addView(label("This notebook could not be opened.\n\nIt has not been changed. You can put back an automatic backup below " +
+            "(the damaged copy is kept), or go back to the library.", 20f))
         val dir = file.parentFile!!
         val fmt = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.getDefault())
         val candidates = listOf("session-1.bak", "session-2.bak", "pre-library.bak", "v2-backup.inkn")
             .map { File(dir, "$notebookName.$it") }
             .filter { f -> f.exists() && try { NoteStore.load(f); true } catch (_: Throwable) { false } }
         for (f in candidates) {
-            box.addView(tb("Restore backup from ${fmt.format(java.util.Date(f.lastModified()))}") {
+            box.addView(EButton(this, null, "Restore backup from ${fmt.format(java.util.Date(f.lastModified()))}") {
                 try {
                     file.copyTo(File(dir, "$notebookName.damaged-${System.currentTimeMillis()}"), overwrite = false)
                     f.copyTo(file, overwrite = true)
                     recreate()
-                } catch (t: Throwable) { Toast.makeText(this, "Could not restore: ${t.message}", Toast.LENGTH_LONG).show() }
-            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 24 })
+                } catch (t: Throwable) { box.addView(label("Could not restore: ${t.message}", 18f)) }
+            }, LinearLayout.LayoutParams(-1, Eink.BAR_H).apply { topMargin = 24 })
         }
-        if (candidates.isEmpty()) box.addView(TextView(this).apply { text = "\nNo readable backup was found."; textSize = 18f; setTextColor(Color.BLACK) })
-        box.addView(tb("Back to library") { finish() }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 24 })
+        if (candidates.isEmpty()) box.addView(label("\nNo readable backup was found.", 18f))
+        box.addView(EButton(this, null, "Back to library") { finish() }, LinearLayout.LayoutParams(-1, Eink.BAR_H).apply { topMargin = 24 })
         setContentView(box)
     }
 
@@ -258,115 +294,169 @@ class NotesActivity : Activity(), InkView.Host {
         handleIncoming(intent)
     }
 
-    // ---- toolbar helpers ---------------------------------------------------------------------
-
-    private fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-    private fun weight() = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-
-    /** Plain bordered button. No ripple, no animation: those only cause extra e-ink refreshes. */
-    private fun tb(label: String, onClick: () -> Unit) = Button(this).apply {
-        text = label
-        textSize = 15f
-        isAllCaps = false
-        minHeight = 100
-        minimumHeight = 100
-        stateListAnimator = null
-        setTextColor(Color.BLACK)
-        background = border(false)
-        setPadding(4, 0, 4, 0)
-        setOnClickListener { onClick() }
+    private fun renameNotebook() {
+        sheet.input("Notebook name", note.title) { t ->
+            val name = t.trim().ifEmpty { return@input }
+            note.title = name; titleView.text = name; onDocumentChanged()
+        }
     }
 
-    private fun border(selected: Boolean) = GradientDrawable().apply {
-        setColor(if (selected) Color.BLACK else Color.WHITE)
-        setStroke(3, Color.BLACK)
-        cornerRadius = 8f
-    }
+    // ---- tools and wells ---------------------------------------------------------------------
 
-    private fun mark(b: Button, selected: Boolean) {
-        b.background = border(selected)
-        b.setTextColor(if (selected) Color.WHITE else Color.BLACK)
-    }
-
-    // ---- tools -------------------------------------------------------------------------------
-
-    /** Tapping the active tool again opens its options; tapping another tool switches to it. */
     private fun onToolTapped(t: Tool) {
         val current = if (ink.tool == Tool.CALLIGRAPHY) Tool.PEN else ink.tool
-        if (current == t && (t == Tool.PEN || t == Tool.HIGHLIGHTER || t == Tool.SHAPE || t == Tool.ERASER || t == Tool.TEXT)) {
-            if (optionsBar.visibility == View.VISIBLE) optionsBar.visibility = View.GONE else showOptions(t)
-        } else selectTool(t)
+        if (current == t && t != Tool.HAND) showToolOptions() else selectTool(t)
     }
 
     private fun selectTool(t: Tool) {
         if (t != Tool.SELECT) ink.clearSelection()
         ink.tool = t
-        for ((tool, b) in toolButtons) mark(b, tool == t || (tool == Tool.PEN && t == Tool.CALLIGRAPHY))
-        optionsBar.visibility = View.GONE
-        selectionBar.visibility = if (t == Tool.SELECT) View.VISIBLE else View.GONE
+        for ((tool, b) in toolButtons) b.selectedState = tool == t || (tool == Tool.PEN && t == Tool.CALLIGRAPHY)
+        toolButtons[Tool.PEN]?.let { it.icon = if (t == Tool.CALLIGRAPHY) "calligraphy" else "pen" }
+        buildWells()
+        updateContext()
         updateSelectionBar()
     }
 
-    private fun showOptions(t: Tool) {
-        optionsBar.removeAllViews()
+    /** Remembered quick picks per tool (editable with a long press). */
+    private fun wells(key: String, def: List<Float>): MutableList<Float> =
+        (prefs.getString("wells_$key", null)?.split(",")?.mapNotNull { it.toFloatOrNull() }?.takeIf { it.size == def.size } ?: def).toMutableList()
+
+    private fun saveWells(key: String, v: List<Float>) { prefs.edit().putString("wells_$key", v.joinToString(",")).apply() }
+
+    private fun buildWells() {
+        wellsBar.removeAllViews()
         val s = ink.settings
-        fun cycle(label: String, names: List<String>, current: () -> Int, apply: (Int) -> Unit) {
-            val b = tb("") { }
-            fun text() { b.text = "$label: ${names[current()]}" }
-            b.setOnClickListener { apply((current() + 1) % names.size); saveToolSettings(); text() }
-            text()
-            optionsBar.addView(b, weight())
+        fun widthWells(key: String, def: List<Float>, get: () -> Float, set: (Float) -> Unit, choices: FloatArray, scaleFor: (Float) -> Float) {
+            val values = wells(key, def)
+            for ((i, v) in values.withIndex()) {
+                val w = Well(this, Well.Kind.WIDTH, v) { set(it.value); saveToolSettings(); buildWells() }
+                w.current = Math.abs(get() - v) < 0.01f
+                w.onLongPress = { _ ->
+                    sheet.list("Width for this quick pick", choices.mapIndexed { n, c ->
+                        val scale = scaleFor(c)
+                        Row("Size ${n + 1}", detail = if (Math.abs(scale - v) < 0.01f) "current" else null, selected = Math.abs(scale - v) < 0.01f) {
+                            values[i] = scale; saveWells(key, values); set(scale); saveToolSettings(); buildWells()
+                        }
+                    })
+                }
+                wellsBar.addView(w, LinearLayout.LayoutParams(66, 100))
+            }
         }
-        fun idx(values: List<Float>, v: Float) = values.indices.minByOrNull { Math.abs(values[it] - v) } ?: 0
-        fun idxI(values: List<Int>, v: Int) = values.indices.minByOrNull { Math.abs(values[it] - v) } ?: 0
-        when (t) {
-            Tool.PEN, Tool.CALLIGRAPHY -> {
-                val b = tb("") { }
-                b.text = "Style: " + (if (ink.tool == Tool.CALLIGRAPHY) "Calligraphy" else "Pen")
-                b.setOnClickListener {
-                    ink.tool = if (ink.tool == Tool.CALLIGRAPHY) Tool.PEN else Tool.CALLIGRAPHY
-                    showOptions(ink.tool)
+        fun greyWells(key: String, def: List<Float>, get: () -> Int, set: (Int) -> Unit, choices: IntArray) {
+            val values = wells(key, def)
+            for ((i, v) in values.withIndex()) {
+                val w = Well(this, Well.Kind.GREY, v) { set(it.value.toInt()); saveToolSettings(); buildWells() }
+                w.current = get() == v.toInt()
+                w.onLongPress = { _ ->
+                    sheet.list("Grey for this quick pick", choices.map { g ->
+                        Row(greyName(g), selected = g == v.toInt()) { values[i] = g.toFloat(); saveWells(key, values); set(g); saveToolSettings(); buildWells() }
+                    })
                 }
-                optionsBar.addView(b, weight())
-                if (t == Tool.PEN) {
-                    cycle("Width", widthNames, { idx(widthValues, s.penWidth) }) { s.penWidth = widthValues[it] }
-                    cycle("Ink", penGrayNames, { idxI(penGrayValues, s.penGray) }) { s.penGray = penGrayValues[it] }
-                    cycle("Ruler", listOf("Off", "On"), { if (ink.rulerOn) 1 else 0 }) { ink.rulerOn = it == 1 }
-                    cycle("Smooth", listOf("Off", "Light", "Strong"), { s.smoothing }) { s.smoothing = it }
-                } else {
-                    cycle("Width", widthNames, { idx(widthValues, s.calWidth) }) { s.calWidth = widthValues[it] }
-                    cycle("Ink", penGrayNames, { idxI(penGrayValues, s.calGray) }) { s.calGray = penGrayValues[it] }
-                    cycle("Angle", angleNames, { idx(angleValues, s.calAngle) }) { s.calAngle = angleValues[it] }
-                    cycle("Nib", flatNames, { idx(flatValues, s.calFlat) }) { s.calFlat = flatValues[it] }
-                    cycle("Ruler", listOf("Off", "On"), { if (ink.rulerOn) 1 else 0 }) { ink.rulerOn = it == 1 }
-                }
+                wellsBar.addView(w, LinearLayout.LayoutParams(66, 100))
             }
-            Tool.ERASER -> {
-                val modes = listOf("Whole stroke", "Partial")
-                cycle("Erase", modes, { if (s.eraserPartial) 1 else 0 }) { s.eraserPartial = it == 1 }
-                val sizes = listOf(10f, 18f, 32f)
-                cycle("Size", listOf("Small", "Medium", "Large"), { idx(sizes, s.eraserRadius) }) { s.eraserRadius = sizes[it] }
+        }
+        fun gap() = wellsBar.addView(View(this), LinearLayout.LayoutParams(16, 1))
+        fun small(ic: String?, text: String?, selected: Boolean = false, onClick: () -> Unit) =
+            wellsBar.addView(EButton(this, ic, text) { onClick() }.apply { textSize = 24f; selectedState = selected }, LinearLayout.LayoutParams(-2, 92).apply { leftMargin = 6 })
+        val penScale = { n: Float -> n / 2f }
+        when (ink.tool) {
+            Tool.PEN -> {
+                widthWells("pen_w", listOf(0.5f, 1f, 1.5f), { s.penWidth }, { s.penWidth = it }, WIDTH_STEPS, penScale); gap()
+                greyWells("pen_g", listOf(0f, 70f, 140f), { s.penGray }, { s.penGray = it }, PEN_GREYS)
             }
-            Tool.TEXT -> {
-                val sizes = listOf(28f, 38f, 52f, 72f)
-                cycle("Size", listOf("Small", "Medium", "Large", "Huge"), { idx(sizes, s.textSize) }) { s.textSize = sizes[it] }
-                cycle("Ink", penGrayNames, { idxI(penGrayValues, s.textGray) }) { s.textGray = penGrayValues[it] }
-                cycle("Bold", listOf("Off", "On"), { if (s.textBold) 1 else 0 }) { s.textBold = it == 1 }
-            }
-            Tool.SHAPE -> {
-                val kinds = UserShape.values().toList()
-                cycle("Shape", kinds.map { it.label }, { kinds.indexOf(s.shapeTool) }) { s.shapeTool = kinds[it] }
-                cycle("Width", widthNames, { idx(widthValues, s.penWidth) }) { s.penWidth = widthValues[it] }
-                cycle("Ink", penGrayNames, { idxI(penGrayValues, s.penGray) }) { s.penGray = penGrayValues[it] }
+            Tool.CALLIGRAPHY -> {
+                widthWells("cal_w", listOf(0.5f, 1f, 1.5f), { s.calWidth }, { s.calWidth = it }, WIDTH_STEPS, penScale); gap()
+                greyWells("cal_g", listOf(0f, 70f, 140f), { s.calGray }, { s.calGray = it }, PEN_GREYS)
             }
             Tool.HIGHLIGHTER -> {
-                cycle("Width", widthNames, { idx(widthValues, s.hlWidth) }) { s.hlWidth = widthValues[it] }
-                cycle("Tone", hlGrayNames, { idxI(hlGrayValues, s.hlGray) }) { s.hlGray = hlGrayValues[it] }
-                cycle("Ruler", listOf("Off", "On"), { if (ink.rulerOn) 1 else 0 }) { ink.rulerOn = it == 1 }
+                widthWells("hl_w", listOf(0.5f, 0.75f, 1f), { s.hlWidth }, { s.hlWidth = it }, floatArrayOf(5f, 7.5f, 10f, 15f, 20f, 30f, 40f)) { it / 20f }; gap()
+                greyWells("hl_g", listOf(210f, 170f, 130f), { s.hlGray }, { s.hlGray = it }, HL_GREYS)
             }
+            Tool.ERASER -> {
+                val sizes = wells("er_w", listOf(10f, 18f, 32f))
+                for (v in sizes) wellsBar.addView(Well(this, Well.Kind.WIDTH, v / 6f) { s.eraserRadius = v; saveToolSettings(); buildWells() }
+                    .apply { current = Math.abs(s.eraserRadius - v) < 0.5f }, LinearLayout.LayoutParams(66, 100))
+                gap()
+                small(null, "Whole", !s.eraserPartial) { s.eraserPartial = false; saveToolSettings(); buildWells() }
+                small(null, "Partial", s.eraserPartial) { s.eraserPartial = true; saveToolSettings(); buildWells() }
+            }
+            Tool.SHAPE -> {
+                small(null, s.shapeTool.label) { chooseShape() }
+                widthWells("sh_w", listOf(0.5f, 1f, 1.5f), { s.penWidth }, { s.penWidth = it }, WIDTH_STEPS, penScale); gap()
+                greyWells("pen_g", listOf(0f, 70f, 140f), { s.penGray }, { s.penGray = it }, PEN_GREYS)
+            }
+            Tool.TEXT -> {
+                for (v in wells("tx_s", listOf(28f, 38f, 56f))) wellsBar.addView(Well(this, Well.Kind.TEXT, v) { s.textSize = v; saveToolSettings(); buildWells() }
+                    .apply { current = Math.abs(s.textSize - v) < 0.5f }, LinearLayout.LayoutParams(66, 100))
+                gap()
+                greyWells("tx_g", listOf(0f, 70f, 140f), { s.textGray }, { s.textGray = it }, PEN_GREYS)
+                small(null, "B", s.textBold) { s.textBold = !s.textBold; saveToolSettings(); buildWells() }
+            }
+            Tool.TAPE -> {
+                small(null, "Hide all") { ink.setAllTape(true) }
+                small(null, "Show all") { ink.setAllTape(false) }
+            }
+            Tool.SELECT -> {
+                small(null, "Select all") { ink.selectAll() }
+            }
+            Tool.HAND -> {
+                small(null, "Zoom " + ink.zoomLabel()) { ink.cycleZoom(); buildWells() }
+            }
+        }
+        if (ink.tool != Tool.HAND && ink.tool != Tool.SELECT && ink.tool != Tool.TAPE) {
+            wellsBar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+            wellsBar.addView(icon("gear", null) { showToolOptions() }, LinearLayout.LayoutParams(84, 100))
+        }
+    }
+
+    private fun greyName(g: Int) = when {
+        g <= 10 -> "Black"; g <= 60 -> "Very dark"; g <= 100 -> "Dark"; g <= 140 -> "Mid"; g <= 180 -> "Light"; g <= 215 -> "Pale"; else -> "Very pale"
+    }
+
+    private fun chooseShape() {
+        val kinds = UserShape.values().toList()
+        sheet.choose("Shape", kinds.map { it.label to it }, ink.settings.shapeTool) { ink.settings.shapeTool = it; saveToolSettings(); buildWells() }
+    }
+
+    private fun onOff(b: Boolean) = if (b) "On" else "Off"
+
+    /** The less frequent options of the active tool. */
+    private fun showToolOptions() {
+        val s = ink.settings
+        val rows = ArrayList<Row>()
+        val reopen = { showToolOptions() }
+        when (ink.tool) {
+            Tool.PEN, Tool.CALLIGRAPHY -> {
+                rows.add(Row("Style", if (ink.tool == Tool.CALLIGRAPHY) "Calligraphy (width follows the nib angle)" else "Pen (width follows pressure)") {
+                    ink.tool = if (ink.tool == Tool.CALLIGRAPHY) Tool.PEN else Tool.CALLIGRAPHY; selectTool(ink.tool); reopen()
+                })
+                if (ink.tool == Tool.CALLIGRAPHY) {
+                    val angles = listOf("0°" to 0f, "45°" to 0.7854f, "90°" to 1.5708f, "135°" to 2.3562f)
+                    rows.add(Row("Nib angle", angles.minByOrNull { Math.abs(it.second - s.calAngle) }!!.first) {
+                        sheet.choose("Nib angle", angles, angles.minByOrNull { Math.abs(it.second - s.calAngle) }!!.second) { s.calAngle = it; saveToolSettings() }
+                    })
+                    val flats = listOf("Soft" to 0.5f, "Medium" to 0.75f, "Broad" to 0.95f)
+                    rows.add(Row("Nib", flats.minByOrNull { Math.abs(it.second - s.calFlat) }!!.first) {
+                        sheet.choose("Nib", flats, flats.minByOrNull { Math.abs(it.second - s.calFlat) }!!.second) { s.calFlat = it; saveToolSettings() }
+                    })
+                }
+                rows.add(Row("Smoothing", listOf("Off", "Light", "Strong")[s.smoothing.coerceIn(0, 2)]) {
+                    sheet.choose("Smoothing", listOf("Off" to 0, "Light" to 1, "Strong" to 2), s.smoothing) { s.smoothing = it; saveToolSettings() }
+                })
+                rows.add(Row("Ruler", onOff(ink.rulerOn) + " - a straight edge you can move and turn") { ink.rulerOn = !ink.rulerOn })
+                rows.add(Row("Hold pen still to snap shapes", onOff(s.shapeSnap)) { s.shapeSnap = !s.shapeSnap; saveToolSettings() })
+            }
+            Tool.HIGHLIGHTER -> rows.add(Row("Ruler", onOff(ink.rulerOn)) { ink.rulerOn = !ink.rulerOn })
+            Tool.ERASER -> {
+                rows.add(Row("Mode", if (s.eraserPartial) "Partial: erase only the area touched" else "Whole: erase whole strokes") { s.eraserPartial = !s.eraserPartial; saveToolSettings(); buildWells() })
+            }
+            Tool.SHAPE -> rows.add(Row("Shape", s.shapeTool.label) { chooseShape() })
+            Tool.TEXT -> rows.add(Row("Bold", onOff(s.textBold)) { s.textBold = !s.textBold; saveToolSettings(); buildWells() })
             else -> return
         }
-        optionsBar.visibility = View.VISIBLE
+        rows.add(Row("Quick picks", "Long-press a width or grey above to change it", enabled = false) { })
+        sheet.list("Tool options", rows)
     }
 
     private fun loadToolSettings() {
@@ -395,33 +485,38 @@ class NotesActivity : Activity(), InkView.Host {
 
     // ---- selection bar -----------------------------------------------------------------------
 
+    private fun bar() = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(Color.WHITE); setPadding(8, 10, 8, 10)
+    }
+
+    private fun barButton(text: String, onClick: () -> Unit) = EButton(this, null, text) { onClick() }.apply { textSize = 26f }
+
     private fun buildSelectionBar(): LinearLayout {
-        val bar = row().apply { setBackgroundColor(Color.WHITE) }
-        val del = tb("Delete") { ink.deleteSelection() }
-        val copy = tb("Copy") { Clipboard.items = ink.copySelection(); updateSelectionBar() }
-        val cut = tb("Cut") { Clipboard.items = ink.copySelection(); ink.deleteSelection(); updateSelectionBar() }
-        val dup = tb("Duplicate") { ink.duplicateSelection() }
-        pasteBtn = tb("Paste") { ink.paste(Clipboard.items) }
-        val all = tb("All") { ink.selectAll() }
-        val done = tb("Done") { ink.clearSelection() }
-        editBtn = tb("Edit") { editSelectedText() }
+        val b = bar()
+        val del = barButton("Delete") { ink.deleteSelection() }
+        val copy = barButton("Copy") { Clipboard.items = ink.copySelection(); updateSelectionBar() }
+        val cut = barButton("Cut") { Clipboard.items = ink.copySelection(); ink.deleteSelection(); updateSelectionBar() }
+        val dup = barButton("Duplicate") { ink.duplicateSelection() }
+        pasteBtn = barButton("Paste") { ink.paste(Clipboard.items) }
+        val done = barButton("Done") { ink.clearSelection() }
+        editBtn = barButton("Edit text") { editSelectedText() }
         selectionButtons = listOf(del, copy, cut, dup, done)
-        for (b in listOf(all, del, copy, cut, dup, pasteBtn, editBtn, done)) bar.addView(b, weight())
-        return bar
+        for (v in listOf(del, copy, cut, dup, pasteBtn, editBtn, done)) b.addView(v, LinearLayout.LayoutParams(0, Eink.BAR_H, 1f).apply { leftMargin = 6 })
+        return b
     }
 
     private fun updateSelectionBar() {
         if (!::pasteBtn.isInitialized) return
         val has = ink.hasSelection
-        for (b in selectionButtons) b.alpha = if (has) 1f else 0.35f
-        pasteBtn.alpha = if (Clipboard.items.isNotEmpty()) 1f else 0.35f
-        editBtn.alpha = if (ink.selectedText() != null) 1f else 0.35f
+        for (b in selectionButtons) b.enabledState = has
+        pasteBtn.enabledState = Clipboard.items.isNotEmpty()
+        editBtn.enabledState = ink.selectedText() != null
     }
 
-    override fun onSelectionChanged() { updateSelectionBar() }
+    override fun onSelectionChanged() { updateSelectionBar(); updateContext() }
 
     override fun onTextRequested(x: Float, y: Float, existing: TextItem?) {
-        showTextDialog(existing?.text ?: "") { text ->
+        sheet.input(if (existing != null) "Edit text" else "New text", existing?.text ?: "", multiline = true) { text ->
             if (existing != null) ink.updateText(existing, text) else ink.addText(text, x, y)
             selectTool(Tool.SELECT)          // the new text box stays selected, ready to move or resize
         }
@@ -429,18 +524,7 @@ class NotesActivity : Activity(), InkView.Host {
 
     private fun editSelectedText() {
         val t = ink.selectedText() ?: return
-        showTextDialog(t.text) { ink.updateText(t, it) }
-    }
-
-    private fun showTextDialog(initial: String, onDone: (String) -> Unit) {
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            minLines = 3; gravity = Gravity.TOP; textSize = 20f
-            setText(initial); setSelection(initial.length)
-        }
-        AlertDialog.Builder(this).setTitle("Text").setView(input)
-            .setPositiveButton("OK") { _, _ -> onDone(input.text.toString()) }
-            .setNegativeButton("Cancel", null).show()
+        sheet.input("Edit text", t.text, multiline = true) { ink.updateText(t, it) }
     }
 
     // ---- audio -------------------------------------------------------------------------------
@@ -471,7 +555,7 @@ class NotesActivity : Activity(), InkView.Host {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_MIC) {
             if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) startRecording()
-            else Toast.makeText(this, "Recording needs the microphone permission", Toast.LENGTH_LONG).show()
+            else say("Recording needs the microphone permission")
         }
     }
 
@@ -484,7 +568,7 @@ class NotesActivity : Activity(), InkView.Host {
             updateRecButton()
             ui.removeCallbacks(recTick); ui.postDelayed(recTick, 10000)
         } catch (e: Throwable) {
-            Toast.makeText(this, "Could not start recording: ${e.message}", Toast.LENGTH_LONG).show()
+            say("Could not start recording: ${e.message}")
         }
     }
 
@@ -498,60 +582,57 @@ class NotesActivity : Activity(), InkView.Host {
 
     private fun updateRecButton() {
         val on = AudioNotes.active != null
-        recBtn.text = if (on) "Stop " + AudioNotes.clock(AudioNotes.elapsedMs()) else "Rec"
-        mark(recBtn, on)
+        recBtn.icon = if (on) "stop" else "mic"
+        recBtn.label = if (on) AudioNotes.clock(AudioNotes.elapsedMs()) else "Rec"
+        recBtn.selectedState = on
     }
 
     private fun showRecordings() {
-        hideSettings()
         if (note.recordings.isEmpty()) {
-            Toast.makeText(this, "No recordings yet. Tap Rec to start one; what you write meanwhile is linked to the sound.", Toast.LENGTH_LONG).show()
+            say("No recordings yet. Tap Rec to start one; what you write meanwhile is linked to the sound.")
             return
         }
         val fmt = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.getDefault())
-        val labels = note.recordings.map { "Recording ${it.id}   ${AudioNotes.clock(it.durationMs)}   ${fmt.format(java.util.Date(it.startedAt))}" }
-        AlertDialog.Builder(this).setTitle("Audio recordings")
-            .setItems(labels.toTypedArray()) { _, i -> recordingMenu(note.recordings[i]) }
-            .setNegativeButton("Close", null).show()
+        sheet.list("Audio recordings", note.recordings.map { r ->
+            Row("Recording ${r.id}", "${AudioNotes.clock(r.durationMs)}  ·  ${fmt.format(java.util.Date(r.startedAt))}") { recordingMenu(r) }
+        })
     }
 
     private fun recordingMenu(r: Recording) {
-        AlertDialog.Builder(this).setTitle("Recording ${r.id}")
-            .setItems(arrayOf("Play", "Delete")) { _, which ->
-                if (which == 0) startPlayback(r, 0)
-                else AlertDialog.Builder(this).setMessage("Delete recording ${r.id}? The sound is removed; your writing stays.")
-                    .setPositiveButton("Delete") { _, _ -> AudioNotes.delete(this, note, r); stopPlaybackUi(); dirty = true; save() }
-                    .setNegativeButton("Keep", null).show()
-            }.setNegativeButton("Back", null).show()
+        sheet.list("Recording ${r.id}", listOf(
+            Row("Play") { startPlayback(r, 0) },
+            Row("Delete recording", "Your writing stays") {
+                sheet.confirm("Delete recording ${r.id}?", "The sound is removed; your writing stays.", "Delete") {
+                    AudioNotes.delete(this, note, r); stopPlaybackUi(); dirty = true; save()
+                }
+            }
+        ))
     }
 
     private fun buildPlayBar(): LinearLayout {
-        val bar = row().apply { setBackgroundColor(Color.WHITE) }
-        playPauseBtn = tb("Pause") { if (AudioNotes.isPlaying) AudioNotes.pause() else AudioNotes.resume(); updatePlayUi() }
-        playPosBtn = tb("0:00") { }
-        replayBtn = tb("Replay: off") { replayOn = !replayOn; updatePlayUi(); AudioNotes.playing?.let { ink.setReplay(if (replayOn) it.id else 0, AudioNotes.positionMs()) } }
-        for (b in listOf(playPauseBtn, tb("-10 s") { AudioNotes.seekTo(AudioNotes.positionMs() - 10000); updatePlayUi() },
-            tb("+10 s") { AudioNotes.seekTo(AudioNotes.positionMs() + 10000); updatePlayUi() }, playPosBtn, replayBtn,
-            tb("Stop") { stopPlaybackUi() })) bar.addView(b, weight())
-        return bar
+        val b = bar()
+        playPauseBtn = EButton(this, "pause", null) { if (AudioNotes.isPlaying) AudioNotes.pause() else AudioNotes.resume(); updatePlayUi() }
+        playPosBtn = EButton(this, null, "0:00") { }.apply { bordered = false; textSize = 26f }
+        replayBtn = barButton("Replay: off") { replayOn = !replayOn; updatePlayUi(); AudioNotes.playing?.let { ink.setReplay(if (replayOn) it.id else 0, AudioNotes.positionMs()) } }
+        for (v in listOf(playPauseBtn, barButton("-10 s") { AudioNotes.seekTo(AudioNotes.positionMs() - 10000); updatePlayUi() },
+            barButton("+10 s") { AudioNotes.seekTo(AudioNotes.positionMs() + 10000); updatePlayUi() }, playPosBtn, replayBtn,
+            EButton(this, "stop", null) { stopPlaybackUi() })) b.addView(v, LinearLayout.LayoutParams(0, Eink.BAR_H, 1f).apply { leftMargin = 6 })
+        return b
     }
 
     private fun updatePlayUi() {
         if (!::playBar.isInitialized) return
-        playPauseBtn.text = if (AudioNotes.isPlaying) "Pause" else "Play"
-        playPosBtn.text = AudioNotes.clock(AudioNotes.positionMs()) + " / " + AudioNotes.clock(AudioNotes.durationMs())
-        replayBtn.text = "Replay: " + (if (replayOn) "on" else "off")
+        playPauseBtn.icon = if (AudioNotes.isPlaying) "pause" else "play"
+        playPosBtn.label = AudioNotes.clock(AudioNotes.positionMs()) + " / " + AudioNotes.clock(AudioNotes.durationMs())
+        replayBtn.label = "Replay: " + (if (replayOn) "on" else "off")
     }
 
     private fun startPlayback(r: Recording, from: Int) {
-        if (AudioNotes.active != null) { Toast.makeText(this, "Stop recording first", Toast.LENGTH_SHORT).show(); return }
-        if (!AudioNotes.play(this, r, from) { stopPlaybackUi() }) {
-            Toast.makeText(this, "Could not play that recording", Toast.LENGTH_LONG).show(); return
-        }
-        optionsBar.visibility = View.GONE
-        playBar.visibility = View.VISIBLE
+        if (AudioNotes.active != null) { say("Stop recording first"); return }
+        if (!AudioNotes.play(this, r, from) { stopPlaybackUi() }) { say("Could not play that recording"); return }
         ink.onSeekItem = { item -> if (item.recId == r.id) { AudioNotes.seekTo(item.recMs); updatePlayUi() } }
         updatePlayUi()
+        updateContext()
         ink.setReplay(if (replayOn) r.id else 0, from)
         ui.removeCallbacks(playTick); ui.postDelayed(playTick, 2000)
     }
@@ -559,9 +640,8 @@ class NotesActivity : Activity(), InkView.Host {
     private fun stopPlaybackUi() {
         AudioNotes.stopPlayback()
         ui.removeCallbacks(playTick)
-        if (::playBar.isInitialized) playBar.visibility = View.GONE
-        ink.onSeekItem = null
-        ink.setReplay(0, 0)
+        if (::ink.isInitialized) { ink.onSeekItem = null; ink.setReplay(0, 0) }
+        if (::contextBar.isInitialized) updateContext()
     }
 
     // ---- images ------------------------------------------------------------------------------
@@ -570,34 +650,26 @@ class NotesActivity : Activity(), InkView.Host {
 
     private fun pickImage() {
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "image/*" }
-        try { startActivityForResult(i, REQ_IMAGE) }
-        catch (_: Throwable) { Toast.makeText(this, "No file picker found on this tablet", Toast.LENGTH_LONG).show() }
+        try { startActivityForResult(i, REQ_IMAGE) } catch (_: Throwable) { say("No file picker found on this tablet") }
     }
 
     private fun importImage(uri: Uri) {
-        hideSettings()
         thread(name = "image-import") {
             try {
                 val img = ImageStore.importFrom(this, uri)
                 ui.post { ink.insertImage(img); selectTool(Tool.SELECT) }
             } catch (e: Throwable) {
-                ui.post { Toast.makeText(this, e.message ?: "Could not use that picture", Toast.LENGTH_LONG).show() }
+                ui.post { say(e.message ?: "Could not use that picture") }
             }
         }
     }
 
     private fun refreshChrome() {
-        pageLabel.text = "${ink.pageIndex + 1}/${note.pages.size}"
-        undoBtn.alpha = if (ink.canUndo) 1f else 0.35f
-        redoBtn.alpha = if (ink.canRedo) 1f else 0.35f
-        zoomBtn.text = "Zoom " + ink.zoomLabel()
-        if (::paperBtn.isInitialized) {
-            inkModeBtn.text = "Ink mode: " + presets[presetIndex].first
-            polishBtn.text = "Polish after writing: " + (if (polish) "on" else "off")
-            paperBtn.text = "Paper: " + ink.page.paper.label
-            snapBtn.text = "Hold pen to snap shapes: " + (if (ink.settings.shapeSnap) "on" else "off")
-            sideBtn.text = "Pen side button: " + ink.sideButtonTool.name.lowercase()
-        }
+        if (!::pageBtn.isInitialized) return
+        pageBtn.label = "${ink.pageIndex + 1} / ${note.pages.size}"
+        undoBtn.enabledState = ink.canUndo
+        redoBtn.enabledState = ink.canRedo
+        if (ink.tool == Tool.HAND) buildWells()
     }
 
     private fun goPage(delta: Int) {
@@ -610,12 +682,8 @@ class NotesActivity : Activity(), InkView.Host {
     private val REQ_PDF = 41
 
     private fun pickPdf() {
-        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/pdf"
-        }
-        try { startActivityForResult(i, REQ_PDF) }
-        catch (_: Throwable) { Toast.makeText(this, "No file picker found on this tablet", Toast.LENGTH_LONG).show() }
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "application/pdf" }
+        try { startActivityForResult(i, REQ_PDF) } catch (_: Throwable) { say("No file picker found on this tablet") }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -639,33 +707,24 @@ class NotesActivity : Activity(), InkView.Host {
     private fun importPdf(uri: Uri) {
         if (importing) return
         importing = true
-        hideSettings()
+        sheet.hide()
         importText.text = "Importing PDF..."
         importPanel.visibility = View.VISIBLE
         thread(name = "pdf-import") {
             try {
                 val name = pdfs.importFrom(this, uri)
-                val count = pdfs.pageCount(name)
-                val pages = ArrayList<PageData>(count)
-                for (i in 0 until count) {
-                    val (wp, hp) = pdfs.pageSize(name, i)
-                    val pg = PageData(Paper.BLANK)
-                    pg.pdfFile = name; pg.pdfPage = i
-                    pg.w = PAGE_W; pg.h = PAGE_W * hp / wp.toFloat()
-                    pages.add(pg)
-                    if (i % 10 == 0) ui.post { importText.text = "Importing PDF...\n\nreading page ${i + 1} of $count" }
-                }
+                val pages = pdfs.buildPages(name) { i, n -> ui.post { importText.text = "Importing PDF...\n\nreading page $i of $n" } }
                 ui.post {
                     ink.insertPagesAfterCurrent(pages)
                     importPanel.visibility = View.GONE
                     importing = false
-                    Toast.makeText(this, "Imported $count pages", Toast.LENGTH_LONG).show()
+                    say("Imported ${pages.size} pages")
                 }
             } catch (e: Throwable) {
                 ui.post {
                     importPanel.visibility = View.GONE
                     importing = false
-                    Toast.makeText(this, e.message ?: "Could not import that PDF", Toast.LENGTH_LONG).show()
+                    say(e.message ?: "Could not import that PDF")
                 }
             }
         }
@@ -675,7 +734,6 @@ class NotesActivity : Activity(), InkView.Host {
     private fun exportPdf() {
         if (importing) return
         importing = true
-        hideSettings()
         save()
         importText.text = "Exporting PDF..."
         importPanel.visibility = View.VISIBLE
@@ -685,90 +743,86 @@ class NotesActivity : Activity(), InkView.Host {
                 ui.post {
                     importPanel.visibility = View.GONE; importing = false
                     val mb = r.bytes / 1048576.0
-                    Toast.makeText(this, "Saved ${r.pages} pages to Download/Ink Notes/${r.name} (${"%.1f".format(mb)} MB)", Toast.LENGTH_LONG).show()
+                    say("Saved ${r.pages} pages to Download/Ink Notes/${r.name} (${"%.1f".format(mb)} MB)")
                     if (debuggableApp) Log.d("InkDebug", "exported ${r.uri} ${r.pages} pages ${r.bytes} bytes name=${r.name}")
                 }
             } catch (e: Throwable) {
                 ui.post {
                     importPanel.visibility = View.GONE; importing = false
-                    Toast.makeText(this, "Could not export: ${e.message}", Toast.LENGTH_LONG).show()
+                    say("Could not export: ${e.message}")
                 }
             }
         }
     }
 
-    private fun confirmDeletePage() {
-        AlertDialog.Builder(this)
-            .setMessage("Delete page ${ink.pageIndex + 1} of ${note.pages.size}? Its writing goes with it.")
-            .setPositiveButton("Delete") { _, _ -> ink.deleteCurrentPage(); refreshChrome(); hideSettings() }
-            .setNegativeButton("Keep", null)
-            .show()
+    // ---- More menu and settings --------------------------------------------------------------
+
+    private fun showMore() {
+        sheet.list("Notebook", listOf(
+            Row("Pages and bookmarks", "Thumbnails, reorder, copy, delete, go to a page") { showPages() },
+            Row("Add a page after this one") { ink.addPageAfterCurrent() },
+            Row("Paper for this page", ink.page.paper.label) { choosePaper() },
+            Row("Insert image...") { pickImage() },
+            Row("Import PDF into this notebook...") { pickPdf() },
+            Row("Audio recordings", if (note.recordings.isEmpty()) "None yet" else "${note.recordings.size}") { showRecordings() },
+            Row("Export as PDF", "Saved to Download/Ink Notes") { exportPdf() },
+            Row("Delete this page", "Page ${ink.pageIndex + 1} of ${note.pages.size}") { confirmDeletePage() },
+            Row("Clean screen", "One full refresh to clear ghosting") { eink.fullRefresh() },
+            Row("Settings") { showSettings() },
+            Row("Back to library") { save(); finish() }
+        ))
     }
 
-    // ---- settings ----------------------------------------------------------------------------
+    private fun choosePaper() {
+        sheet.choose("Paper for this page", Paper.values().map { it.label.replaceFirstChar { c -> c.uppercase() } to it }, ink.page.paper) {
+            ink.setPaper(it); refreshChrome()
+        }
+    }
 
-    private fun buildSettings(): LinearLayout {
-        val p = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            isClickable = true
-            setPadding(40, 30, 40, 30)
+    private fun confirmDeletePage() {
+        sheet.confirm("Delete page ${ink.pageIndex + 1}?", "Page ${ink.pageIndex + 1} of ${note.pages.size} and its writing will be removed.", "Delete page") {
+            ink.deleteCurrentPage(); refreshChrome()
         }
-        p.addView(TextView(this).apply { text = "Settings"; textSize = 24f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.BLACK) })
-        inkModeBtn = tb("") {
-            presetIndex = (presetIndex + 1) % presets.size
-            prefs.edit().putInt("preset", presetIndex).apply()
-            if (presetIndex == 0) eink.restore()
-            refreshChrome()
-        }
-        polishBtn = tb("") { polish = !polish; prefs.edit().putBoolean("polish", polish).apply(); refreshChrome() }
-        paperBtn = tb("") { ink.setPaper(ink.page.paper.next()); refreshChrome() }
-        sideBtn = tb("") {
-            val order = listOf(Tool.ERASER, Tool.SELECT, Tool.HAND, Tool.HIGHLIGHTER, Tool.PEN)
-            ink.sideButtonTool = order[(order.indexOf(ink.sideButtonTool) + 1) % order.size]
-            prefs.edit().putInt("side", ink.sideButtonTool.ordinal).apply()
-            refreshChrome()
-        }
-        snapBtn = tb("") { ink.settings.shapeSnap = !ink.settings.shapeSnap; saveToolSettings(); refreshChrome() }
-        for (b in listOf(inkModeBtn, polishBtn, snapBtn, paperBtn, sideBtn,
-            tb("Back to library") { save(); finish() },
-            tb("Import PDF into this notebook...") { pickPdf() },
-            tb("Delete this page") { confirmDeletePage() },
-            tb("Insert image...") { pickImage() },
-            tb("Audio recordings...") { showRecordings() },
-            tb("Export notebook as PDF") { exportPdf() },
-            tb("Full screen refresh now") { eink.fullRefresh(); hideSettings() },
-            tb("Open device test tools (Probe)") { save(); startActivity(Intent(this, ProbeActivity::class.java)) },
-            tb("Android 'About' screen (tap Build number 7 times)") { openAbout() },
-            tb("Developer options (after unlocking)") { openDeveloperOptions() },
-            tb("Close") { hideSettings() })) {
-            p.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = 18 })
-        }
-        devStatus = TextView(this).apply { textSize = 14f; setTextColor(Color.BLACK); setPadding(0, 22, 0, 0) }
-        p.addView(devStatus)
-        p.addView(TextView(this).apply {
-            text = "Buttons: Volume Up/Down turn pages. In the tablet's own settings you can also give buttons " +
-                "Zoom In/Out, arrow keys, Page Up/Down, Tab (next tool) or Enter (new page); they work here."
-            textSize = 14f; setTextColor(Color.BLACK); setPadding(0, 24, 0, 0)
-        })
-        return p
     }
 
     private fun showSettings() {
-        refreshChrome()
-        updateDevStatus()
-        settingsPanel.visibility = View.VISIBLE
+        val s = ink.settings
+        val sideOrder = listOf(Tool.ERASER, Tool.SELECT, Tool.HAND, Tool.HIGHLIGHTER, Tool.PEN)
+        sheet.list("Settings", listOf(
+            Row("Fast ink while writing", presets[presetIndex].first) {
+                sheet.choose("Fast ink while writing", presets.mapIndexed { i, p -> p.first to i }, presetIndex) {
+                    presetIndex = it; prefs.edit().putInt("preset", it).apply(); if (it == 0) eink.restore()
+                }
+            },
+            Row("Redraw cleanly after writing", onOff(polish)) { polish = !polish; prefs.edit().putBoolean("polish", polish).apply(); showSettings() },
+            Row("Hold pen still to snap shapes", onOff(s.shapeSnap)) { s.shapeSnap = !s.shapeSnap; saveToolSettings(); showSettings() },
+            Row("Pen side button", ink.sideButtonTool.name.lowercase().replaceFirstChar { it.uppercase() }) {
+                sheet.choose("While the side button is held", sideOrder.map { it.name.lowercase().replaceFirstChar { c -> c.uppercase() } to it }, ink.sideButtonTool) {
+                    ink.sideButtonTool = it; prefs.edit().putInt("side", it.ordinal).apply()
+                }
+            },
+            Row("Keep the screen on", onOff(prefs.getBoolean("keepAwake", false))) {
+                val on = !prefs.getBoolean("keepAwake", false)
+                prefs.edit().putBoolean("keepAwake", on).apply()
+                if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                showSettings()
+            },
+            Row("Device tools", "Probe, Android About, Developer options") { showDeviceTools() },
+            Row("About Ink Notes", "Version ${packageManager.getPackageInfo(packageName, 0).versionName}", enabled = false) { }
+        ))
     }
 
-    private fun updateDevStatus() {
+    private fun showDeviceTools() {
         val dev = Settings.Global.getInt(contentResolver, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) == 1
         val adb = Settings.Global.getInt(contentResolver, Settings.Global.ADB_ENABLED, 0) == 1
-        devStatus.text = "Developer options: " + (if (dev) "ON" else "off") + "   USB debugging: " + (if (adb) "ON" else "off")
+        sheet.list("Device tools", listOf(
+            Row("Open device test tools (Probe)") { save(); startActivity(Intent(this, ProbeActivity::class.java)) },
+            Row("Android 'About' screen", "Tap Build number 7 times to unlock developer options") { openAbout() },
+            Row("Developer options", "Developer options: ${onOff(dev)}   USB debugging: ${onOff(adb)}") { openDeveloperOptions() }
+        ))
     }
 
-    private fun hideSettings() { settingsPanel.visibility = View.GONE; ink.repaintAll() }
-
-    private fun showPages() { pagesPanel.show(); pagesPanel.visibility = View.VISIBLE }
+    private fun showPages() { sheet.hide(); pagesPanel.show(); pagesPanel.visibility = View.VISIBLE }
     private fun hidePages() { pagesPanel.visibility = View.GONE; refreshChrome(); ink.repaintAll() }
 
     /** Starts the first of these screens that exists on this firmware. */
@@ -792,7 +846,7 @@ class NotesActivity : Activity(), InkView.Host {
             Intent().setClassName("com.android.settings", "com.android.settings.Settings\$DeviceInfoSettingsActivity"),
             Intent(Settings.ACTION_SETTINGS)
         )
-        if (!ok) Toast.makeText(this, "No About screen found on this firmware", Toast.LENGTH_LONG).show()
+        if (!ok) say("No About screen found on this firmware")
     }
 
     private fun openDeveloperOptions() {
@@ -801,13 +855,14 @@ class NotesActivity : Activity(), InkView.Host {
             Intent().setClassName("com.android.settings", "com.android.settings.Settings\$DevelopmentSettingsDashboardActivity"),
             Intent().setClassName("com.android.settings", "com.android.settings.DevelopmentSettings")
         )
-        if (!ok) Toast.makeText(this, "Developer options are still locked: unlock them from the About screen first", Toast.LENGTH_LONG).show()
+        if (!ok) say("Developer options are still locked: unlock them from the About screen first")
     }
 
     // ---- InkView.Host ------------------------------------------------------------------------
 
     override fun onPenDown() {
         ui.removeCallbacks(settleToQuality)
+        if (sheet.isShowing) sheet.hide()
         val fast = presets[presetIndex].second ?: return
         if (!inFast) { inFast = true; eink.set(fast, "pen down") }
     }
@@ -835,13 +890,9 @@ class NotesActivity : Activity(), InkView.Host {
         val code = ev.keyCode
         // While a PDF is imported or exported the pages must not change underneath it.
         if (importing && code != KeyEvent.KEYCODE_BACK) return true
-        if (settingsPanel.visibility == View.VISIBLE && code == KeyEvent.KEYCODE_BACK) {
-            if (ev.action == KeyEvent.ACTION_UP) hideSettings()
-            return true
-        }
-        if (pagesPanel.visibility == View.VISIBLE && code == KeyEvent.KEYCODE_BACK) {
-            if (ev.action == KeyEvent.ACTION_UP) hidePages()
-            return true
+        if (code == KeyEvent.KEYCODE_BACK) {
+            if (sheet.isShowing) { if (ev.action == KeyEvent.ACTION_UP) sheet.hide(); return true }
+            if (pagesPanel.visibility == View.VISIBLE) { if (ev.action == KeyEvent.ACTION_UP) hidePages(); return true }
         }
         val handled = when (code) {
             KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN,
@@ -855,7 +906,7 @@ class NotesActivity : Activity(), InkView.Host {
         if ((code == KeyEvent.KEYCODE_VOLUME_UP || code == KeyEvent.KEYCODE_VOLUME_DOWN) && ev.action == KeyEvent.ACTION_DOWN) {
             ink.ignoreVirtualFor(1500)      // the firmware follows a volume press with a fake swipe
         }
-        if (ev.action == KeyEvent.ACTION_DOWN && ev.repeatCount == 0 && settingsPanel.visibility != View.VISIBLE) {
+        if (ev.action == KeyEvent.ACTION_DOWN && ev.repeatCount == 0 && !sheet.isShowing) {
             val zoomed = ink.zoomIndex > 0
             when (code) {
                 KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_PAGE_UP -> goPage(-1)
@@ -896,14 +947,8 @@ class NotesActivity : Activity(), InkView.Host {
         prefs.edit().putInt("lastPage_$notebookName", ink.pageIndex).apply()
         if (!dirty && !force && file.exists()) return
         try { NoteStore.save(note, file, touch = dirty || !file.exists()); dirty = false } catch (t: Throwable) {
-            Toast.makeText(this, "Could not save: $t", Toast.LENGTH_LONG).show()
+            say("Could not save: $t")
         }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        if (!ready) return
-        if (::devStatus.isInitialized && settingsPanel.visibility == View.VISIBLE) updateDevStatus()
     }
 
     // The panel mode is system-wide, so always hand it back when we leave.
@@ -943,10 +988,17 @@ class NotesActivity : Activity(), InkView.Host {
                 when (cmd) {
                     "tool_pen" -> selectTool(Tool.PEN)
                     "tool_marker" -> selectTool(Tool.HIGHLIGHTER)
-                    "tool_calli" -> { selectTool(Tool.PEN); ink.tool = Tool.CALLIGRAPHY }
+                    "tool_calli" -> { selectTool(Tool.PEN); ink.tool = Tool.CALLIGRAPHY; selectTool(Tool.CALLIGRAPHY) }
                     "tool_shape" -> selectTool(Tool.SHAPE)
                     "tool_text" -> selectTool(Tool.TEXT)
                     "tool_tape" -> selectTool(Tool.TAPE)
+                    "tool_erase" -> selectTool(Tool.ERASER)
+                    "tool_select" -> selectTool(Tool.SELECT)
+                    "tool_hand" -> selectTool(Tool.HAND)
+                    "tool_options" -> showToolOptions()
+                    "more" -> showMore()
+                    "settings" -> showSettings()
+                    "sheet_close" -> sheet.hide()
                     "ruler" -> ink.rulerOn = i.getBooleanExtra("v", true)
                     "smooth" -> { ink.settings.smoothing = i.getIntExtra("v", 1); saveToolSettings() }
                     "rec_start" -> if (AudioNotes.active == null) onRecTapped()
@@ -963,9 +1015,6 @@ class NotesActivity : Activity(), InkView.Host {
                     "paper" -> Paper.values().firstOrNull { it.name == i.getStringExtra("v") }?.let { ink.setPaper(it); refreshChrome() }
                     "shape_kind" -> UserShape.values().firstOrNull { it.name == i.getStringExtra("v") }?.let { ink.settings.shapeTool = it }
                     "snap" -> { ink.settings.shapeSnap = i.getBooleanExtra("v", true); saveToolSettings() }
-                    "tool_erase" -> selectTool(Tool.ERASER)
-                    "tool_select" -> selectTool(Tool.SELECT)
-                    "tool_hand" -> selectTool(Tool.HAND)
                     "undo" -> ink.undo()
                     "redo" -> ink.redo()
                     "page_next" -> goPage(1)

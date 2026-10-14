@@ -1,27 +1,38 @@
 package app.einknotes.notes
 
 import android.app.Activity
-import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
-import android.widget.ImageView
+import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
+import app.einknotes.notes.ui.EButton
+import app.einknotes.notes.ui.Eink
+import app.einknotes.notes.ui.Icons
+import app.einknotes.notes.ui.Notice
+import app.einknotes.notes.ui.Row
+import app.einknotes.notes.ui.Sheet
+import app.einknotes.notes.ui.label
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -29,182 +40,264 @@ import java.util.Locale
 import kotlin.concurrent.thread
 
 /**
- * The home screen: every notebook with a picture of its first page. Plain lists and borders, no animation,
- * so the e-ink panel only redraws when something really changes.
+ * The home screen. Notebooks are cards in a grid that turns page by page (no scrolling: it smears on e-ink).
+ * Sections: All, Recent, Favorites, a folder, Recently deleted. Every action is in a flat sheet.
  */
 class LibraryActivity : Activity() {
 
-    private class Entry(val id: String, val file: File, val header: NoteStore.Header)
+    private class Entry(val id: String, val file: File, val header: NoteStore.Header, val damaged: Boolean = false)
 
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var pdfs: PdfLibrary
-    private lateinit var listBox: LinearLayout
+    private lateinit var frame: FrameLayout
+    private lateinit var sheet: Sheet
+    private lateinit var notice: Notice
+    private lateinit var grid: LinearLayout
+    private lateinit var pageLabel: TextView
+    private lateinit var prevBtn: EButton
+    private lateinit var nextBtn: EButton
+    private lateinit var sectionBar: LinearLayout
+    private lateinit var sortBtn: EButton
     private lateinit var busyPanel: LinearLayout
     private lateinit var busyText: TextView
     private val dir by lazy { File(filesDir, "notes") }
+    private val trash by lazy { File(dir, "trash").also { it.mkdirs() } }
     private var busy = false
     private val REQ_PDF = 51
     private val REQ_BACKUP = 52
-    private lateinit var folderBtn: Button
     private val prefs get() = getSharedPreferences("library", MODE_PRIVATE)
 
-    // folder filter: "*" = every notebook, "-" = notebooks that are in no folder, otherwise a folder name
-    private val ALL = "*"
-    private val NONE = "-"
-    private var selectedFolder = ALL
+    // what is shown
+    private val ALL = "*"; private val RECENT = "#recent"; private val FAVORITES = "#fav"; private val UNFILED = "-"; private val DELETED = "#deleted"
+    private var section = ALL
+    private var gridPage = 0
+    private val COLS = 3
+    private val ROWS = 2
+
     private fun folders(): List<String> = (prefs.getStringSet("folders", emptySet()) ?: emptySet()).sortedBy { it.lowercase() }
     private fun folderOf(id: String): String = prefs.getString("folder_$id", "") ?: ""
+    private fun isFavorite(id: String) = prefs.getBoolean("fav_$id", false)
+    private fun isFolder(s: String) = s != ALL && s != RECENT && s != FAVORITES && s != UNFILED && s != DELETED
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pdfs = PdfLibrary(this)
+        section = prefs.getString("section", ALL) ?: ALL
 
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
-        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(24, 18, 24, 6) }
-        head.addView(TextView(this).apply { text = "Library"; textSize = 30f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.BLACK) },
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE); setPadding(16, 8, 16, 8) }
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        head.addView(label("Library", 30f, bold = true).apply { setPadding(12, 0, 0, 0) }, LinearLayout.LayoutParams(0, -2, 1f))
+        head.addView(btn("plus", "New") { newNotebook() }, LinearLayout.LayoutParams(130, Eink.BAR_H + 8))
+        head.addView(btn("pdf", "Import PDF") { pickPdf() }, LinearLayout.LayoutParams(170, Eink.BAR_H + 8))
+        head.addView(btn("export", "Restore") { pickBackup() }, LinearLayout.LayoutParams(150, Eink.BAR_H + 8))
         root.addView(head)
-        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        bar.addView(button("New notebook") { newNotebook() }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        bar.addView(button("Import PDF...") { pickPdf() }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        bar.addView(button("Restore backup...") { pickBackup() }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(bar)
-        selectedFolder = prefs.getString("selected", ALL) ?: ALL
-        folderBtn = button("") { chooseFolderFilter() }
-        root.addView(folderBtn, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
-        listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(16, 12, 16, 24) }
-        root.addView(ScrollView(this).apply { addView(listBox) }, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        val frame = android.widget.FrameLayout(this)
+        sectionBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        root.addView(sectionBar, LinearLayout.LayoutParams(-1, Eink.BAR_H).apply { topMargin = 8 })
+        root.addView(View(this).apply { setBackgroundColor(Color.BLACK) }, LinearLayout.LayoutParams(-1, 3).apply { topMargin = 8 })
+
+        grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 12, 0, 0) }
+        root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        val pager = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        prevBtn = EButton(this, "left", null) { gridPage--; refresh() }
+        nextBtn = EButton(this, "right", null) { gridPage++; refresh() }
+        pageLabel = label("", 22f).apply { gravity = Gravity.CENTER }
+        sortBtn = EButton(this, null, "Sort") { chooseSort() }.apply { textSize = 24f }
+        pager.addView(sortBtn, LinearLayout.LayoutParams(280, Eink.BAR_H))
+        pager.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        pager.addView(prevBtn, LinearLayout.LayoutParams(150, Eink.BAR_H))
+        pager.addView(pageLabel, LinearLayout.LayoutParams(200, -2))
+        pager.addView(nextBtn, LinearLayout.LayoutParams(150, Eink.BAR_H))
+        root.addView(pager)
+
+        frame = FrameLayout(this)
         frame.addView(root)
         busyPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE); isClickable = true
             setPadding(60, 400, 60, 60); visibility = View.GONE
         }
-        busyText = TextView(this).apply { textSize = 22f; setTextColor(Color.BLACK) }
+        busyText = label("", 22f)
         busyPanel.addView(busyText)
         frame.addView(busyPanel)
         setContentView(frame)
+        sheet = Sheet(this, frame)
+        notice = Notice(frame)
+        purgeOldTrash()
         handleIncoming(intent)
         registerDebugControl()
     }
 
-    /** Debug builds only: adb shell am broadcast -a app.einknotes.LIBRARY --es cmd restore_path --es path /sdcard/Download/x.inkz */
-    private fun registerDebugControl() {
-        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
-        debugReceiver = object : android.content.BroadcastReceiver() {
-            override fun onReceive(c: android.content.Context, i: Intent) {
-                when (i.getStringExtra("cmd")) {
-                    "restore_path" -> i.getStringExtra("path")?.let { restore(Uri.fromFile(File(it))) }
-                    "backup" -> entries().firstOrNull { it.id == i.getStringExtra("id") }?.let { backUp(it) }
-                    "list" -> android.util.Log.d("InkDebug", "library: " + entries().joinToString { "${it.id}='${it.header.title}' pages=${it.header.pageCount} folder='${folderOf(it.id)}'" })
-                    "folder" -> { val id = i.getStringExtra("id") ?: return; val f = i.getStringExtra("folder") ?: ""
-                        if (f.isEmpty()) prefs.edit().remove("folder_$id").apply()
-                        else prefs.edit().putString("folder_$id", f).putStringSet("folders", (folders() + f).toSet()).apply()
-                        refresh() }
-                    "select" -> { selectedFolder = i.getStringExtra("v") ?: ALL; refresh() }
-                    "delete" -> entries().firstOrNull { it.id == i.getStringExtra("id") }?.let { deleteNotebook(it) }
-                }
-            }
-        }
-        registerReceiver(debugReceiver, android.content.IntentFilter("app.einknotes.LIBRARY"))
-    }
-
-    private var debugReceiver: android.content.BroadcastReceiver? = null
-
-    override fun onDestroy() {
-        debugReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) { } }
-        super.onDestroy()
-    }
+    private fun btn(icon: String?, text: String?, onClick: () -> Unit) = EButton(this, icon, text) { onClick() }.apply { bordered = false }
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleIncoming(intent) }
 
     override fun onResume() { super.onResume(); refresh() }
 
+    @Deprecated("Back closes an open sheet first")
+    override fun onBackPressed() { if (sheet.isShowing) sheet.hide() else super.onBackPressed() }
+
     // ---- list --------------------------------------------------------------------------------
 
-    private fun entries(): List<Entry> {
-        val files = dir.listFiles { f -> Regex("^[A-Za-z0-9_]+\\.inkn$").matches(f.name) } ?: return emptyList()
-        return files.mapNotNull { f ->
-            val h = NoteStore.readHeader(f) ?: return@mapNotNull null
-            Entry(f.name.removeSuffix(".inkn"), f, h)
-        }.sortedByDescending { it.header.modified }
+    private fun entriesIn(d: File): List<Entry> {
+        val files = d.listFiles { f -> Regex("^[A-Za-z0-9_]+\\.inkn$").matches(f.name) } ?: return emptyList()
+        return files.map { f ->
+            val id = f.name.removeSuffix(".inkn")
+            val h = NoteStore.readHeader(f)
+            // A damaged notebook stays visible: opening it offers its backups.
+            if (h == null) Entry(id, f, NoteStore.Header("Damaged notebook ($id)", f.lastModified(), f.lastModified(), 0), damaged = true)
+            else Entry(id, f, h)
+        }
+    }
+
+    private fun entries(): List<Entry> = entriesIn(dir)
+
+    private fun sorted(list: List<Entry>): List<Entry> = when (prefs.getString("sort", "edited")) {
+        "created" -> list.sortedByDescending { it.header.created }
+        "az" -> list.sortedBy { it.header.title.lowercase() }
+        "za" -> list.sortedByDescending { it.header.title.lowercase() }
+        else -> list.sortedByDescending { it.header.modified }
+    }
+
+    private fun shown(): List<Entry> = when (section) {
+        DELETED -> entriesIn(trash).sortedByDescending { prefs.getLong("deletedAt_${it.id}", 0) }
+        RECENT -> entries().filter { prefs.getLong("opened_${it.id}", 0) > 0 }.sortedByDescending { prefs.getLong("opened_${it.id}", 0) }.take(12)
+        FAVORITES -> sorted(entries().filter { isFavorite(it.id) })
+        UNFILED -> sorted(entries().filter { folderOf(it.id).isEmpty() })
+        ALL -> sorted(entries())
+        else -> sorted(entries().filter { folderOf(it.id) == section })
+    }
+
+    private fun sectionName(s: String) = when (s) {
+        ALL -> "All"; RECENT -> "Recent"; FAVORITES -> "Favorites"; UNFILED -> "No folder"; DELETED -> "Recently deleted"; else -> s
+    }
+
+    private fun buildSections() {
+        sectionBar.removeAllViews()
+        fun chip(text: String, key: String) {
+            val b = EButton(this, null, text) { section = key; gridPage = 0; prefs.edit().putString("section", key).apply(); refresh() }
+            b.textSize = 26f; b.selectedState = section == key; b.bordered = false
+            sectionBar.addView(b, LinearLayout.LayoutParams(-2, Eink.BAR_H).apply { rightMargin = 6 })
+        }
+        chip("All", ALL); chip("Recent", RECENT); chip("Favorites", FAVORITES)
+        val inFolder = isFolder(section) || section == UNFILED
+        val f = EButton(this, null, if (inFolder) "Folder: ${sectionName(section)}" else "Folders...") { chooseFolderSection() }
+        f.textSize = 26f; f.selectedState = inFolder; f.bordered = false
+        sectionBar.addView(f, LinearLayout.LayoutParams(-2, Eink.BAR_H).apply { rightMargin = 6 })
+        sectionBar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        chip("Recently deleted", DELETED)
     }
 
     private fun refresh() {
-        listBox.removeAllViews()
-        if (selectedFolder != ALL && selectedFolder != NONE && selectedFolder !in folders()) selectedFolder = ALL
-        folderBtn.text = "Folder: " + when (selectedFolder) { ALL -> "all notebooks"; NONE -> "no folder"; else -> selectedFolder }
-        val everything = entries()
-        val all = when (selectedFolder) {
-            ALL -> everything
-            NONE -> everything.filter { folderOf(it.id).isEmpty() }
-            else -> everything.filter { folderOf(it.id) == selectedFolder }
-        }
-        if (all.isEmpty() && everything.isNotEmpty()) {
-            listBox.addView(TextView(this).apply {
-                text = "No notebooks in this folder.\n\nUse the Folder button on a notebook to put it here."
-                textSize = 18f; setTextColor(Color.BLACK); setPadding(12, 40, 12, 12)
-            })
+        if (!::grid.isInitialized) return
+        if (isFolder(section) && section !in folders()) section = ALL
+        buildSections()
+        sortBtn.label = "Sort: " + when (prefs.getString("sort", "edited")) { "created" -> "created"; "az" -> "A to Z"; "za" -> "Z to A"; else -> "last edited" }
+        sortBtn.enabledState = section != RECENT && section != DELETED
+        val list = shown()
+        val per = COLS * ROWS
+        val pages = maxOf(1, (list.size + per - 1) / per)
+        gridPage = gridPage.coerceIn(0, pages - 1)
+        pageLabel.text = "${gridPage + 1} / $pages"
+        prevBtn.enabledState = gridPage > 0
+        nextBtn.enabledState = gridPage < pages - 1
+        grid.removeAllViews()
+        if (list.isEmpty()) {
+            grid.addView(label(when (section) {
+                DELETED -> "Nothing here. Deleted notebooks stay here for 30 days, then they are removed."
+                FAVORITES -> "No favorites yet. Open a notebook's menu (the dots on its card) and choose Add to favorites."
+                RECENT -> "Notebooks you open will appear here."
+                ALL -> "No notebooks yet.\n\nTap New to start writing, or Import PDF to annotate a document."
+                else -> "This folder is empty. Use Move to folder in a notebook's menu to put one here."
+            }, 20f).apply { setPadding(16, 40, 16, 16) })
             return
         }
-        if (all.isEmpty()) {
-            listBox.addView(TextView(this).apply {
-                text = "No notebooks yet.\n\nTap New notebook to start writing, or Import PDF to annotate a document."
-                textSize = 18f; setTextColor(Color.BLACK); setPadding(12, 40, 12, 12)
-            })
-            return
-        }
-        val fmt = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
-        for (e in all) listBox.addView(row(e, fmt))
-        // notebooks that have no picture yet get one, then the list is shown again
-        val missing = everything.filter { !File(dir, "${it.id}.png").exists() }
-        if (missing.isNotEmpty() && !drawingThumbnails) {
-            drawingThumbnails = true
-            thread(name = "thumbnails") {
-                for (e in missing) try {
-                    val n = NoteStore.load(e.file)
-                    Thumbnailer.save(n.pages[0], pdfs, 360, File(dir, "${e.id}.png"))
-                } catch (_: Throwable) { }
-                ui.post { drawingThumbnails = false; refresh() }
+        val pageItems = list.drop(gridPage * per).take(per)
+        for (r in 0 until ROWS) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (c in 0 until COLS) {
+                val e = pageItems.getOrNull(r * COLS + c)
+                val v: View = if (e != null) Card(this, e) else View(this)
+                row.addView(v, LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(10, 10, 10, 10) })
             }
+            grid.addView(row, LinearLayout.LayoutParams(-1, 0, 1f))
         }
+        makeMissingThumbnails(list)
     }
 
     private var drawingThumbnails = false
 
-    private fun row(e: Entry, fmt: SimpleDateFormat): View {
-        val r = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            background = border(); setPadding(14, 14, 14, 14)
-            isClickable = true; setOnClickListener { open(e.id) }
+    private fun makeMissingThumbnails(list: List<Entry>) {
+        if (section == DELETED) return
+        val missing = list.filter { !it.damaged && !File(dir, "${it.id}.png").exists() }
+        if (missing.isEmpty() || drawingThumbnails) return
+        drawingThumbnails = true
+        thread(name = "thumbnails") {
+            for (e in missing) try {
+                val n = NoteStore.load(e.file)
+                Thumbnailer.save(n.pages[0], pdfs, 360, File(dir, "${e.id}.png"))
+            } catch (_: Throwable) { }
+            ui.post { drawingThumbnails = false; refresh() }
         }
-        val thumb = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER; setBackgroundColor(Color.WHITE)
-            val png = File(dir, "${e.id}.png")
-            if (png.exists()) BitmapFactory.decodeFile(png.path)?.let { setImageBitmap(it) }
+    }
+
+    /** One notebook: picture of the first page, title, details. Tap opens; the dots (or a long press) open its menu. */
+    private inner class Card(ctx: Context, val e: Entry) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+        private val thumb: Bitmap? = run {
+            val f = File(if (section == DELETED) trash else dir, "${e.id}.png")
+            if (f.exists()) try { BitmapFactory.decodeFile(f.path) } catch (_: Throwable) { null } else null
         }
-        r.addView(thumb, LinearLayout.LayoutParams(190, 250))
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 0, 12, 0) }
-        col.addView(TextView(this).apply { text = e.header.title; textSize = 24f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.BLACK) })
-        val folder = folderOf(e.id)
-        col.addView(TextView(this).apply {
-            text = "${e.header.pageCount} ${if (e.header.pageCount == 1) "page" else "pages"}  ·  edited ${fmt.format(Date(e.header.modified))}" +
-                (if (folder.isNotEmpty()) "  ·  $folder" else "")
-            textSize = 15f; setTextColor(Color.BLACK); setPadding(0, 6, 0, 14)
-        })
-        val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        btns.addView(button("Open") { open(e.id) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        btns.addView(button("Rename") { rename(e) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        btns.addView(button("Delete") { confirmDelete(e) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        col.addView(btns)
-        val btns2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        btns2.addView(button("Folder...") { chooseFolderFor(e) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        btns2.addView(button("Back up") { backUp(e) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        col.addView(btns2)
-        r.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        return LinearLayout(this).apply {
-            setPadding(0, 8, 0, 8); addView(r, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        private val fmt = SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault())
+        private var downAt = 0L
+
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            val textH = 124f
+            p.style = Paint.Style.STROKE; p.strokeWidth = Eink.BORDER; p.color = Color.BLACK
+            c.drawRoundRect(RectF(2f, 2f, w - 2f, h - 2f), Eink.RADIUS, Eink.RADIUS, p)
+            // page picture, kept in proportion
+            val box = RectF(24f, 20f, w - 24f, h - textH - 6f)
+            val b = thumb
+            p.style = Paint.Style.STROKE; p.strokeWidth = 2f; p.color = Eink.GREY
+            if (b != null) {
+                val s = minOf(box.width() / b.width, box.height() / b.height)
+                val dw = b.width * s; val dh = b.height * s
+                val dst = RectF(box.centerX() - dw / 2, box.top, box.centerX() + dw / 2, box.top + dh)
+                c.drawBitmap(b, Rect(0, 0, b.width, b.height), dst, Paint(Paint.FILTER_BITMAP_FLAG))
+                c.drawRect(dst, p)
+            } else {
+                val dw = box.height() * 0.75f
+                c.drawRect(box.centerX() - dw / 2, box.top, box.centerX() + dw / 2, box.bottom, p)
+            }
+            // text
+            p.style = Paint.Style.FILL; p.color = Color.BLACK; p.textSize = 30f; p.typeface = Typeface.DEFAULT_BOLD
+            var title = e.header.title
+            val maxW = w - 110f
+            while (title.length > 1 && p.measureText(title) > maxW) title = title.dropLast(2) + "…"
+            c.drawText(title, 24f, h - textH + 44f, p)
+            p.typeface = Typeface.DEFAULT; p.textSize = 22f; p.color = Eink.GREY
+            val detail = if (section == DELETED) "deleted ${fmt.format(Date(prefs.getLong("deletedAt_${e.id}", 0)))}"
+                else "${e.header.pageCount} ${if (e.header.pageCount == 1) "page" else "pages"} · ${fmt.format(Date(e.header.modified))}"
+            c.drawText(detail, 24f, h - textH + 80f, p)
+            val folder = folderOf(e.id)
+            if (folder.isNotEmpty() && section != DELETED) c.drawText(folder, 24f, h - textH + 110f, p)
+            p.color = Color.BLACK
+            if (isFavorite(e.id) && section != DELETED) Icons.draw(c, "starfill", w - 48f, 48f, 40f, stroke, p)
+            Icons.draw(c, "more", w - 54f, h - textH + 34f, 44f, stroke, p)
+        }
+
+        override fun onTouchEvent(ev: MotionEvent): Boolean {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> downAt = SystemClock.uptimeMillis()
+                MotionEvent.ACTION_UP -> {
+                    val long = SystemClock.uptimeMillis() - downAt > 550
+                    val onDots = ev.x > width - 120 && ev.y > height - 140
+                    if (section == DELETED || long || onDots) cardMenu(e) else open(e.id)
+                }
+            }
+            return true
         }
     }
 
@@ -214,135 +307,108 @@ class LibraryActivity : Activity() {
 
     private fun open(id: String) {
         // a double tap must not start two editors on the same notebook
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = SystemClock.uptimeMillis()
         if (now - lastOpenAt < 1500) return
         lastOpenAt = now
+        prefs.edit().putLong("opened_$id", System.currentTimeMillis()).apply()
         startActivity(Intent(this, NotesActivity::class.java).putExtra("notebook", id))
-    }
-
-    // ---- folders -----------------------------------------------------------------------------
-
-    private fun newFolderDialog(then: (String) -> Unit) {
-        val input = EditText(this).apply { setSingleLine(); hint = "Folder name" }
-        AlertDialog.Builder(this).setTitle("New folder").setView(input)
-            .setPositiveButton("Create") { _, _ ->
-                val name = input.text.toString().trim().take(40)
-                if (name.isEmpty() || name == ALL || name == NONE) return@setPositiveButton
-                prefs.edit().putStringSet("folders", (folders() + name).toSet()).apply()
-                then(name)
-            }.setNegativeButton("Cancel", null).show()
-    }
-
-    private fun chooseFolderFilter() {
-        val fs = folders()
-        val labels = ArrayList<String>(); val actions = ArrayList<() -> Unit>()
-        labels.add("All notebooks"); actions.add { selectedFolder = ALL }
-        labels.add("No folder"); actions.add { selectedFolder = NONE }
-        for (f in fs) { labels.add(f); actions.add { selectedFolder = f } }
-        labels.add("+ New folder..."); actions.add { newFolderDialog { selectedFolder = it; prefs.edit().putString("selected", it).apply(); refresh() } }
-        if (selectedFolder != ALL && selectedFolder != NONE) {
-            labels.add("Delete folder \"$selectedFolder\" (notebooks stay)")
-            actions.add {
-                val gone = selectedFolder
-                val ed = prefs.edit().putStringSet("folders", (fs - gone).toSet())
-                for (x in entries()) if (folderOf(x.id) == gone) ed.remove("folder_${x.id}")
-                ed.apply(); selectedFolder = ALL
-            }
-        }
-        AlertDialog.Builder(this).setTitle("Show").setItems(labels.toTypedArray()) { _, i ->
-            actions[i]()
-            prefs.edit().putString("selected", selectedFolder).apply()
-            refresh()
-        }.setNegativeButton("Close", null).show()
-    }
-
-    private fun chooseFolderFor(e: Entry) {
-        val fs = folders()
-        val labels = arrayListOf("No folder") + fs + "+ New folder..."
-        AlertDialog.Builder(this).setTitle("Put \"${e.header.title}\" in").setItems(labels.toTypedArray()) { _, i ->
-            when {
-                i == 0 -> prefs.edit().remove("folder_${e.id}").apply()
-                i <= fs.size -> prefs.edit().putString("folder_${e.id}", fs[i - 1]).apply()
-                else -> { newFolderDialog { prefs.edit().putString("folder_${e.id}", it).apply(); refresh() }; return@setItems }
-            }
-            refresh()
-        }.setNegativeButton("Cancel", null).show()
-    }
-
-    // ---- backup and restore ------------------------------------------------------------------
-
-    private fun backUp(e: Entry) {
-        if (busy) return
-        busy = true
-        busyText.text = "Backing up \"${e.header.title}\"..."
-        busyPanel.visibility = View.VISIBLE
-        thread(name = "backup") {
-            try {
-                val r = NotebookBundle.export(this, e.file)
-                ui.post {
-                    busy = false; busyPanel.visibility = View.GONE
-                    Toast.makeText(this, "Saved Download/Ink Notes/${r.name} (${"%.1f".format(r.bytes / 1048576.0)} MB)", Toast.LENGTH_LONG).show()
-                    android.util.Log.d("InkDebug", "backup ${r.uri} ${r.name} ${r.bytes}")
-                }
-            } catch (t: Throwable) {
-                ui.post { busy = false; busyPanel.visibility = View.GONE; Toast.makeText(this, "Could not back up: ${t.message}", Toast.LENGTH_LONG).show() }
-            }
-        }
-    }
-
-    private fun pickBackup() {
-        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "*/*" }
-        try { startActivityForResult(i, REQ_BACKUP) }
-        catch (_: Throwable) { Toast.makeText(this, "No file picker found on this tablet", Toast.LENGTH_LONG).show() }
-    }
-
-    private fun restore(uri: Uri) {
-        if (busy) return
-        busy = true
-        busyText.text = "Restoring notebook..."
-        busyPanel.visibility = View.VISIBLE
-        thread(name = "restore") {
-            try {
-                val id = NotebookBundle.import(this, uri, "nb_" + System.currentTimeMillis())
-                ui.post { busy = false; busyPanel.visibility = View.GONE; refresh(); Toast.makeText(this, "Notebook restored", Toast.LENGTH_LONG).show() }
-            } catch (t: Throwable) {
-                ui.post { busy = false; busyPanel.visibility = View.GONE; Toast.makeText(this, "Could not restore: ${t.message}", Toast.LENGTH_LONG).show() }
-            }
-        }
     }
 
     private fun newNotebook() {
         val id = "nb_" + System.currentTimeMillis()
         NoteStore.save(NoteData("Untitled"), File(dir, "$id.inkn"))
+        if (isFolder(section)) prefs.edit().putString("folder_$id", section).apply()
         open(id)
     }
 
-    private fun rename(e: Entry) {
-        val input = EditText(this).apply { setText(e.header.title); setSingleLine(); selectAll() }
-        AlertDialog.Builder(this).setTitle("Rename notebook").setView(input)
-            .setPositiveButton("Rename") { _, _ ->
-                val t = input.text.toString().trim().ifEmpty { "Untitled" }
-                try { NoteStore.rename(e.file, t) } catch (_: Throwable) {
-                    Toast.makeText(this, "That notebook could not be read, so it was not renamed", Toast.LENGTH_LONG).show()
+    private fun cardMenu(e: Entry) {
+        if (section == DELETED) {
+            sheet.list(e.header.title, listOf(
+                Row("Put back in the library") { restoreFromTrash(e) },
+                Row("Delete for good", "Cannot be undone") {
+                    sheet.confirm("Delete for good?", "\"${e.header.title}\" and its pages will be removed permanently.", "Delete for good") { deleteForGood(e.id) }
                 }
-                refresh()
+            ))
+            return
+        }
+        val fav = isFavorite(e.id)
+        sheet.list(e.header.title, listOf(
+            Row("Open") { open(e.id) },
+            Row("Rename") { rename(e) },
+            Row(if (fav) "Remove from favorites" else "Add to favorites") { prefs.edit().putBoolean("fav_${e.id}", !fav).apply(); refresh() },
+            Row("Duplicate") { duplicate(e) },
+            Row("Move to folder", folderOf(e.id).ifEmpty { "No folder" }) { chooseFolderFor(e) },
+            Row("Export as PDF", "Saved to Download/Ink Notes") { exportPdf(e) },
+            Row("Back up", "A .inkz file with its PDFs, pictures and audio") { backUp(e) },
+            Row("Delete", "Kept in Recently deleted for 30 days") { moveToTrash(e) }
+        ))
+    }
+
+    private fun rename(e: Entry) {
+        sheet.input("Rename notebook", e.header.title) { t ->
+            val name = t.trim().ifEmpty { "Untitled" }
+            try { NoteStore.rename(e.file, name) } catch (_: Throwable) { notice.show("That notebook could not be read, so it was not renamed") }
+            refresh()
+        }
+    }
+
+    private fun duplicate(e: Entry) {
+        try {
+            val n = NoteStore.load(e.file)
+            n.title = n.title + " copy"
+            n.recordings.clear()          // the sound stays with the original
+            for (p in n.pages) for (it in p.items) { it.recId = 0; it.recMs = 0 }
+            val id = "nb_" + System.currentTimeMillis()
+            NoteStore.save(n, File(dir, "$id.inkn"))
+            File(dir, "${e.id}.png").takeIf { it.exists() }?.copyTo(File(dir, "$id.png"))
+            folderOf(e.id).takeIf { it.isNotEmpty() }?.let { prefs.edit().putString("folder_$id", it).apply() }
+            notice.show("Made \"${n.title}\"")
+        } catch (t: Throwable) { notice.show("Could not duplicate: ${t.message}") }
+        refresh()
+    }
+
+    /** Soft delete: the notebook's files move to notes/trash and can come back for 30 days. */
+    private fun moveToTrash(e: Entry) {
+        for (f in dir.listFiles() ?: emptyArray()) if (f.isFile && f.name.startsWith(e.id + ".")) f.renameTo(File(trash, f.name))
+        prefs.edit().putLong("deletedAt_${e.id}", System.currentTimeMillis()).apply()
+        notice.show("\"${e.header.title}\" moved to Recently deleted")
+        refresh()
+    }
+
+    private fun restoreFromTrash(e: Entry) {
+        if (File(dir, "${e.id}.inkn").exists()) { notice.show("A notebook with the same name is already in the library"); return }
+        for (f in trash.listFiles() ?: emptyArray()) if (f.name.startsWith(e.id + ".")) f.renameTo(File(dir, f.name))
+        prefs.edit().remove("deletedAt_${e.id}").apply()
+        notice.show("\"${e.header.title}\" is back in the library")
+        refresh()
+    }
+
+    private fun deleteForGood(id: String) {
+        for (f in trash.listFiles() ?: emptyArray()) if (f.name.startsWith("$id.")) f.delete()
+        prefs.edit().remove("deletedAt_$id").remove("folder_$id").remove("fav_$id").remove("opened_$id").apply()
+        collectMediaGarbage()
+        refresh()
+    }
+
+    private fun purgeOldTrash() {
+        val cutoff = System.currentTimeMillis() - 30L * 24 * 3600 * 1000
+        var removed = false
+        for (e in entriesIn(trash)) {
+            val at = prefs.getLong("deletedAt_${e.id}", 0)
+            if (at in 1 until cutoff) {
+                for (f in trash.listFiles() ?: emptyArray()) if (f.name.startsWith(e.id + ".")) f.delete()
+                prefs.edit().remove("deletedAt_${e.id}").apply()
+                removed = true
             }
-            .setNegativeButton("Cancel", null).show()
+        }
+        if (removed) collectMediaGarbage()
     }
 
-    private fun confirmDelete(e: Entry) {
-        AlertDialog.Builder(this)
-            .setMessage("Delete \"${e.header.title}\" and all of its pages? This cannot be undone.")
-            .setPositiveButton("Delete") { _, _ -> deleteNotebook(e) }
-            .setNegativeButton("Keep", null).show()
-    }
-
-    private fun deleteNotebook(e: Entry) {
-        for (f in dir.listFiles() ?: emptyArray()) if (f.name.startsWith(e.id + ".")) f.delete()
-        // PDFs, pictures and audio that no remaining notebook uses can go too
+    /** Removes PDFs, pictures and audio that no notebook (in the library or in Recently deleted) uses any more. */
+    private fun collectMediaGarbage() {
         val usedPdfs = HashSet<String>(); val usedImages = HashSet<String>(); val usedAudio = HashSet<String>()
         var allRead = true
-        for (x in entries()) try {
+        for (x in entries() + entriesIn(trash)) try {
             val n = NoteStore.load(x.file)
             n.pages.forEach { p ->
                 p.pdfFile?.let { usedPdfs.add(it) }
@@ -356,14 +422,103 @@ class LibraryActivity : Activity() {
             ImageStore.init(this); ImageStore.collectGarbage(usedImages)
             AudioNotes.collectGarbage(this, usedAudio)
         }
-        prefs.edit().remove("folder_${e.id}").apply()
-        refresh()
     }
+
+    private fun chooseSort() {
+        sheet.choose("Sort notebooks", listOf("Last edited" to "edited", "Created" to "created", "Name A to Z" to "az", "Name Z to A" to "za"),
+            prefs.getString("sort", "edited")) { prefs.edit().putString("sort", it).apply(); refresh() }
+    }
+
+    // ---- folders -----------------------------------------------------------------------------
+
+    private fun newFolder(then: (String) -> Unit) {
+        sheet.input("New folder", "", hint = "Folder name") { t ->
+            val name = t.trim().take(40)
+            if (name.isEmpty() || name.startsWith("#") || name == ALL || name == UNFILED) return@input
+            prefs.edit().putStringSet("folders", (folders() + name).toSet()).apply()
+            then(name)
+        }
+    }
+
+    private fun showSection(s: String) { section = s; gridPage = 0; prefs.edit().putString("section", s).apply(); refresh() }
+
+    private fun chooseFolderSection() {
+        val all = entries()
+        val rows = ArrayList<Row>()
+        rows.add(Row("No folder", "${all.count { folderOf(it.id).isEmpty() }} notebooks", selected = section == UNFILED) { showSection(UNFILED) })
+        for (f in folders()) rows.add(Row(f, "${all.count { folderOf(it.id) == f }} notebooks", selected = section == f) { showSection(f) })
+        rows.add(Row("New folder...") { newFolder { showSection(it) } })
+        if (section in folders()) {
+            val gone = section
+            rows.add(Row("Delete folder \"$gone\"", "Its notebooks stay in the library") {
+                val ed = prefs.edit().putStringSet("folders", (folders() - gone).toSet())
+                for (x in all) if (folderOf(x.id) == gone) ed.remove("folder_${x.id}")
+                ed.apply(); showSection(ALL)
+            })
+        }
+        sheet.list("Folders", rows)
+    }
+
+    private fun chooseFolderFor(e: Entry) {
+        val rows = ArrayList<Row>()
+        val cur = folderOf(e.id)
+        rows.add(Row("No folder", selected = cur.isEmpty()) { prefs.edit().remove("folder_${e.id}").apply(); refresh() })
+        for (f in folders()) rows.add(Row(f, selected = cur == f) { prefs.edit().putString("folder_${e.id}", f).apply(); refresh() })
+        rows.add(Row("New folder...") { newFolder { prefs.edit().putString("folder_${e.id}", it).apply(); refresh() } })
+        sheet.list("Move \"${e.header.title}\" to", rows)
+    }
+
+    // ---- backup, restore, export -------------------------------------------------------------
+
+    private fun busy(text: String) { busy = true; busyText.text = text; busyPanel.visibility = View.VISIBLE }
+    private fun done(message: String?) { busy = false; busyPanel.visibility = View.GONE; message?.let { notice.show(it, 5000) } }
+
+    private fun backUp(e: Entry) {
+        if (busy) return
+        busy("Backing up \"${e.header.title}\"...")
+        thread(name = "backup") {
+            try {
+                val r = NotebookBundle.export(this, e.file)
+                Log.d("InkDebug", "backup ${r.uri} ${r.name} ${r.bytes}")
+                ui.post { done("Saved Download/Ink Notes/${r.name} (${"%.1f".format(r.bytes / 1048576.0)} MB)") }
+            } catch (t: Throwable) { ui.post { done("Could not back up: ${t.message}") } }
+        }
+    }
+
+    private fun exportPdf(e: Entry) {
+        if (busy) return
+        busy("Exporting \"${e.header.title}\"...")
+        thread(name = "export") {
+            try {
+                val n = NoteStore.load(e.file)
+                val r = PdfExporter.export(this, n, pdfs) { i, total -> ui.post { busyText.text = "Exporting \"${e.header.title}\"...\n\npage $i of $total" } }
+                Log.d("InkDebug", "exported ${r.uri} ${r.pages} pages ${r.bytes} bytes name=${r.name}")
+                ui.post { done("Saved Download/Ink Notes/${r.name} (${"%.1f".format(r.bytes / 1048576.0)} MB)") }
+            } catch (t: Throwable) { ui.post { done("Could not export: ${t.message}") } }
+        }
+    }
+
+    private fun pickBackup() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "*/*" }
+        try { startActivityForResult(i, REQ_BACKUP) } catch (_: Throwable) { notice.show("No file picker found on this tablet") }
+    }
+
+    private fun restore(uri: Uri) {
+        if (busy) return
+        busy("Restoring notebook...")
+        thread(name = "restore") {
+            try {
+                NotebookBundle.import(this, uri, "nb_" + System.currentTimeMillis())
+                ui.post { done("Notebook restored"); refresh() }
+            } catch (t: Throwable) { ui.post { done("Could not restore: ${t.message}") } }
+        }
+    }
+
+    // ---- PDF import --------------------------------------------------------------------------
 
     private fun pickPdf() {
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "application/pdf" }
-        try { startActivityForResult(i, REQ_PDF) }
-        catch (_: Throwable) { Toast.makeText(this, "No file picker found on this tablet", Toast.LENGTH_LONG).show() }
+        try { startActivityForResult(i, REQ_PDF) } catch (_: Throwable) { notice.show("No file picker found on this tablet") }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -395,9 +550,7 @@ class LibraryActivity : Activity() {
     /** Copies the PDF in and makes a new notebook with one page per PDF page, named after the file. */
     private fun importPdf(uri: Uri) {
         if (busy) return
-        busy = true
-        busyText.text = "Importing PDF..."
-        busyPanel.visibility = View.VISIBLE
+        busy("Importing PDF...")
         val title = displayName(uri).removeSuffix(".pdf").removeSuffix(".PDF").ifBlank { "Imported PDF" }
         thread(name = "pdf-import") {
             try {
@@ -408,23 +561,49 @@ class LibraryActivity : Activity() {
                 val id = "nb_" + System.currentTimeMillis()
                 NoteStore.save(note, File(dir, "$id.inkn"))
                 try { Thumbnailer.save(pages[0], pdfs, 360, File(dir, "$id.png")) } catch (_: Throwable) { }
-                ui.post { busy = false; busyPanel.visibility = View.GONE; open(id) }
+                ui.post { done(null); open(id) }
             } catch (e: Throwable) {
-                ui.post {
-                    busy = false; busyPanel.visibility = View.GONE
-                    Toast.makeText(this, e.message ?: "Could not import that PDF", Toast.LENGTH_LONG).show()
-                }
+                ui.post { done(e.message ?: "Could not import that PDF") }
             }
         }
     }
 
-    // ---- look --------------------------------------------------------------------------------
+    // ---- debug -------------------------------------------------------------------------------
 
-    private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
-        text = label; textSize = 15f; isAllCaps = false; minHeight = 100; minimumHeight = 100
-        stateListAnimator = null; setTextColor(Color.BLACK); background = border(); setPadding(4, 0, 4, 0)
-        setOnClickListener { onClick() }
+    private var debugReceiver: BroadcastReceiver? = null
+
+    /** Debug builds only: adb shell am broadcast -a app.einknotes.LIBRARY --es cmd <command> */
+    private fun registerDebugControl() {
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
+        debugReceiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                val id = i.getStringExtra("id")
+                when (i.getStringExtra("cmd")) {
+                    "restore_path" -> i.getStringExtra("path")?.let { restore(Uri.fromFile(File(it))) }
+                    "backup" -> entries().firstOrNull { it.id == id }?.let { backUp(it) }
+                    "list" -> Log.d("InkDebug", "library: " + entries().joinToString { "${it.id}='${it.header.title}' pages=${it.header.pageCount} folder='${folderOf(it.id)}' fav=${isFavorite(it.id)}" } +
+                        " | trash: " + entriesIn(trash).joinToString { it.id })
+                    "folder" -> { id ?: return; val f = i.getStringExtra("folder") ?: ""
+                        if (f.isEmpty()) prefs.edit().remove("folder_$id").apply()
+                        else prefs.edit().putString("folder_$id", f).putStringSet("folders", (folders() + f).toSet()).apply()
+                        refresh() }
+                    "section" -> showSection(i.getStringExtra("v") ?: ALL)
+                    "fav" -> { id ?: return; prefs.edit().putBoolean("fav_$id", i.getBooleanExtra("v", true)).apply(); refresh() }
+                    "menu" -> (entries() + entriesIn(trash)).firstOrNull { it.id == id }?.let { cardMenu(it) }
+                    "trash" -> entries().firstOrNull { it.id == id }?.let { moveToTrash(it) }
+                    "untrash" -> entriesIn(trash).firstOrNull { it.id == id }?.let { restoreFromTrash(it) }
+                    "purge" -> id?.let { deleteForGood(it) }
+                    "duplicate" -> entries().firstOrNull { it.id == id }?.let { duplicate(it) }
+                    "page" -> { gridPage = i.getIntExtra("v", 0); refresh() }
+                    "sheet_close" -> sheet.hide()
+                }
+            }
+        }
+        registerReceiver(debugReceiver, IntentFilter("app.einknotes.LIBRARY"))
     }
 
-    private fun border() = GradientDrawable().apply { setColor(Color.WHITE); setStroke(3, Color.BLACK); cornerRadius = 8f }
+    override fun onDestroy() {
+        debugReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) { } }
+        super.onDestroy()
+    }
 }

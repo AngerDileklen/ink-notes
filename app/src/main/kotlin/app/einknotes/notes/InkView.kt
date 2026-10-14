@@ -971,6 +971,15 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     // ---- tape --------------------------------------------------------------------------------
 
+    /** Covers (or lifts) every tape on this page in one undoable step. */
+    fun setAllTape(covered: Boolean) {
+        val tapes = page.items.filterIsInstance<TapeItem>().filter { it.covered != covered }
+        if (tapes.isEmpty()) return
+        tapes.forEach { it.covered = covered }
+        push(Cmd.Custom(page, { tapes.forEach { it.covered = !covered } }, { tapes.forEach { it.covered = covered } }))
+        host.onDocumentChanged(); rebuild()
+    }
+
     private fun dragTape(x: Float, y: Float) {
         val old = tapePreview
         val r = RectF(min(tapeX0, x), min(tapeY0, y), max(tapeX0, x), max(tapeY0, y))

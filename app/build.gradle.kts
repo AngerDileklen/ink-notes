@@ -12,8 +12,8 @@ android {
         minSdk = 28
         // The tablet runs Android 11. Targeting 29 keeps simple file access for the probe's report.
         targetSdk = 29
-        versionCode = 16
-        versionName = "0.11.0-safe-saves"
+        versionCode = 17
+        versionName = "0.12.0-eink-ui"
     }
 
     buildTypes {
