@@ -35,6 +35,12 @@ class ToolSettings {
     var snapHoldMs = 600L
     /** Which shape the Shape tool draws. */
     var shapeTool = UserShape.RECT
+    /** Eraser: remove whole strokes, or only the part under the eraser. */
+    var eraserPartial = false
+    var eraserRadius = 18f
+    var textSize = 38f
+    var textGray = 0
+    var textBold = false
 }
 
 enum class UserShape(val label: String) { LINE("Line"), ARROW("Arrow"), RECT("Rectangle"), ELLIPSE("Ellipse"), TRIANGLE("Triangle") }
@@ -56,6 +62,8 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         fun onDocumentChanged()
         /** The selection appeared, changed or went away. */
         fun onSelectionChanged()
+        /** The Text tool was tapped at (x, y) in page units; [existing] is the text box under the pen, if any. */
+        fun onTextRequested(x: Float, y: Float, existing: TextItem?)
     }
 
     // ---- state -------------------------------------------------------------------------------
@@ -277,6 +285,11 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         host.onDocumentChanged()
     }
 
+    /** Fit -> 1.5x -> 2x -> 3x -> back to Fit. */
+    fun cycleZoom() { zoomBy(if (zoomIndex >= zoomSteps.size - 1) -zoomIndex else 1) }
+
+    fun zoomLabel(): String = when (zoomIndex) { 0 -> "Fit"; 1 -> "1.5x"; 2 -> "2x"; else -> "3x" }
+
     fun zoomBy(step: Int) {
         val next = (zoomIndex + step).coerceIn(0, zoomSteps.size - 1)
         if (next == zoomIndex) return
@@ -307,6 +320,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             is Cmd.Add -> for (added in cmd.items) cmd.page.items.removeAll { x -> x === added }
             is Cmd.Remove -> for ((idx, item) in cmd.removed.asReversed()) cmd.page.items.add(min(idx, cmd.page.items.size), item)
             is Cmd.Transform -> { val inv = Matrix(); cmd.m.invert(inv); for (moved in cmd.items) moved.transform(inv) }
+            is Cmd.Custom -> cmd.undoAction()
         }
         redoStack.add(cmd)
         showPageOf(cmd)
@@ -319,12 +333,16 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             is Cmd.Add -> cmd.page.items.addAll(cmd.items)
             is Cmd.Remove -> for ((idx, _) in cmd.removed) if (idx < cmd.page.items.size) cmd.page.items.removeAt(idx)
             is Cmd.Transform -> for (moved in cmd.items) moved.transform(cmd.m)
+            is Cmd.Custom -> cmd.redoAction()
         }
         undoStack.add(cmd)
         showPageOf(cmd)
     }
 
     private fun push(cmd: Cmd) { undoStack.add(cmd); redoStack.clear() }
+
+    /** For changes made outside the canvas (for example a bookmark): save and refresh the labels. */
+    fun markChanged() { host.onDocumentChanged() }
 
     /** The area that needs a clean repaint after fast writing, or null. Resets it. */
     fun takePolishRect(): Rect? { val r = polish; polish = null; return r }
@@ -508,9 +526,14 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                 lastVx = e.x; lastVy = e.y
                 when (active) {
                     Tool.PEN, Tool.HIGHLIGHTER, Tool.CALLIGRAPHY -> { clearSelection(); beginStroke(active, e.x, e.y, e.pressure) }
-                    Tool.ERASER -> { clearSelection(); erasing = true; erased.clear(); eraseLastX = e.x; eraseLastY = e.y; eraseAt(e.x, e.y) }
+                    Tool.ERASER -> {
+                        clearSelection(); erasing = true; erased.clear(); eraseLastX = e.x; eraseLastY = e.y
+                        eraseBefore = page.items.toList(); partialDirty = false
+                        eraseAt(e.x, e.y)
+                    }
                     Tool.HAND -> { panning = true; panLastX = e.x; panLastY = e.y }
                     Tool.SELECT -> beginSelectGesture(e.x, e.y)
+                    Tool.TEXT -> { clearSelection(); textDown = true; textDownX = e.x; textDownY = e.y }
                     Tool.SHAPE -> { clearSelection(); shapeStartX = e.x; shapeStartY = e.y; previewShape = null; previewRect = null; shapeDragging = true }
                 }
             }
@@ -529,6 +552,10 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                         endStroke()
                     }
                     erasing -> endErase()
+                    textDown -> {
+                        textDown = false
+                        if (hypot(e.x - textDownX, e.y - textDownY) < 16f && e.actionMasked == MotionEvent.ACTION_UP) requestText(e.x, e.y)
+                    }
                     shapeDragging -> endShapeDrag()
                     panning -> { panning = false; transformChanged(); rebuild() }
                     selMode != SelMode.NONE -> endSelectGesture(e.x, e.y)
@@ -540,6 +567,9 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     }
 
     private var shapeDragging = false
+    private var textDown = false
+    private var textDownX = 0f
+    private var textDownY = 0f
 
     private fun move(x: Float, y: Float, rawPressure: Float) {
         when {
@@ -659,6 +689,48 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         }
     }
 
+    // ---- text and images ---------------------------------------------------------------------
+
+    private fun requestText(vx: Float, vy: Float) {
+        val px = (vx - tx) / scale; val py = (vy - ty) / scale
+        val existing = page.items.lastOrNull { it is TextItem && it.hit(px, py, 8f / scale) } as? TextItem
+        host.onTextRequested(px, py, existing)
+    }
+
+    fun addText(text: String, x: Float, y: Float) {
+        if (text.isBlank()) return
+        val w = min(760f, page.w - x - 30f).coerceAtLeast(180f)
+        val item = TextItem(text, x, y, w, settings.textSize, settings.textGray, settings.textBold)
+        page.items.add(item)
+        push(Cmd.Add(page, listOf(item)))
+        selection.clear(); selection.add(item)
+        host.onDocumentChanged(); rebuild(); host.onSelectionChanged()
+    }
+
+    /** Replaces the words in a text box (an empty text removes the box). */
+    fun updateText(item: TextItem, newText: String) {
+        val old = item.text
+        if (newText == old) return
+        if (newText.isBlank()) { selection.clear(); selection.add(item); deleteSelection(); return }
+        item.text = newText
+        push(Cmd.Custom(page, { item.text = old }, { item.text = newText }))
+        host.onDocumentChanged(); rebuild(); host.onSelectionChanged()
+    }
+
+    fun selectedText(): TextItem? = selection.singleOrNull() as? TextItem
+
+    fun insertImage(img: ImageStore.Imported) {
+        val maxW = page.w * 0.6f
+        val w = min(maxW, img.width.toFloat()); val h = w * img.height / img.width
+        val cx = ((width / 2f - tx) / scale).coerceIn(w / 2f, page.w - w / 2f)
+        val cy = ((height / 2f - ty) / scale).coerceIn(h / 2f, page.h - h / 2f)
+        val item = ImageItem(img.name, cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f, img.width, img.height)
+        page.items.add(item)
+        push(Cmd.Add(page, listOf(item)))
+        selection.clear(); selection.add(item)
+        host.onDocumentChanged(); rebuild(); host.onSelectionChanged()
+    }
+
     // ---- shapes ------------------------------------------------------------------------------
 
     /** The pen has been still long enough: if the stroke looks like a shape, replace it with the clean one. */
@@ -743,9 +815,27 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         eraseLastX = vx; eraseLastY = vy
     }
 
+    private var eraseBefore: List<Item> = emptyList()
+    private var partialDirty = false
+
+    /** Partial mode: cut out only the part of each stroke under the eraser; other items are removed whole. */
+    private fun partialAt(px: Float, py: Float, r: Float) {
+        val list = page.items
+        var changed = false
+        for (i in list.indices.reversed()) {
+            val item = list[i]
+            if (item is Stroke) {
+                val frags = item.eraseCircle(px, py, r) ?: continue
+                list.removeAt(i); list.addAll(i, frags); changed = true
+            } else if (item.near(px, py, r) && item.hit(px, py, r)) { list.removeAt(i); changed = true }
+        }
+        if (changed) { partialDirty = true; scheduleRebuild() }
+    }
+
     private fun eraseAt(vx: Float, vy: Float) {
         val px = (vx - tx) / scale; val py = (vy - ty) / scale
-        val r = 18f / scale
+        val r = settings.eraserRadius / scale
+        if (settings.eraserPartial) { partialAt(px, py, r); return }
         val list = page.items
         var removedAny = false
         for (i in list.indices.reversed()) {
@@ -761,6 +851,14 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     private fun endErase() {
         erasing = false
+        if (partialDirty) {
+            val before = eraseBefore; val after = page.items.toList(); val pg = page
+            push(Cmd.Custom(pg, { pg.items.clear(); pg.items.addAll(before) }, { pg.items.clear(); pg.items.addAll(after) }))
+            partialDirty = false
+            rebuild()
+            host.onDocumentChanged()
+            return
+        }
         if (erased.isNotEmpty()) {
             push(Cmd.Remove(page, erased.toList()))
             erased.clear()

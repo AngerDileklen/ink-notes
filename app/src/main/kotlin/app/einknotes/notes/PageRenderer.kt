@@ -7,6 +7,7 @@ import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
+import android.graphics.RectF
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
@@ -40,6 +41,12 @@ class PageRenderer(private val forExport: Boolean = false) {
         xfermode = PorterDuffXfermode(PorterDuff.Mode.MULTIPLY)
     }
 
+    private val imagePaint = Paint().apply {
+        isFilterBitmap = true
+        // pictures are shown in grey: the panel has no colour
+        colorFilter = android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix().apply { setSaturation(0f) })
+    }
+
     private val exportHighlighterPaint = Paint().apply {
         isAntiAlias = true; style = Paint.Style.STROKE; strokeJoin = Paint.Join.ROUND
     }
@@ -60,6 +67,29 @@ class PageRenderer(private val forExport: Boolean = false) {
                 while (y < b) { c.drawLine(l, y, r, y, linePaint); y += step }
                 var x = l + step
                 while (x < r) { c.drawLine(x, t, x, b, linePaint); x += step }
+            }
+            Paper.NARROW -> {
+                val st = 40f * scale
+                var y = t + 100f * scale
+                while (y < b - 20f * scale) { c.drawLine(l + 40f * scale, y, r - 40f * scale, y, linePaint); y += st }
+            }
+            Paper.CORNELL -> {
+                val header = t + 0.09f * page.h * scale
+                val summary = t + 0.82f * page.h * scale
+                val cue = l + 0.28f * page.w * scale
+                c.drawLine(l, header, r, header, linePaint)
+                c.drawLine(l, summary, r, summary, linePaint)
+                c.drawLine(cue, header, cue, summary, linePaint)
+                var y = header + step
+                while (y < summary - 10f * scale) { c.drawLine(cue + 18f * scale, y, r - 30f * scale, y, linePaint); y += step }
+            }
+            Paper.MUSIC -> {
+                val gap = 15f * scale
+                var top = t + 110f * scale
+                while (top + 4 * gap < b - 40f * scale) {
+                    for (k in 0..4) c.drawLine(l + 50f * scale, top + k * gap, r - 50f * scale, top + k * gap, linePaint)
+                    top += 4 * gap + 110f * scale
+                }
             }
             Paper.DOTS -> {
                 var y = t + step
@@ -92,6 +122,17 @@ class PageRenderer(private val forExport: Boolean = false) {
         when (item) {
             is Stroke -> drawStroke(c, item, scale, tx, ty)
             is ShapeItem -> drawShape(c, item, scale, tx, ty)
+            is TextItem -> {
+                c.save()
+                c.translate(tx + item.x * scale, ty + item.y * scale)
+                c.scale(scale, scale)
+                item.layout().draw(c)
+                c.restore()
+            }
+            is ImageItem -> {
+                val bmp = ImageStore.bitmap(item.file, ((item.maxX - item.minX) * scale).toInt()) ?: return
+                c.drawBitmap(bmp, null, RectF(tx + item.minX * scale, ty + item.minY * scale, tx + item.maxX * scale, ty + item.maxY * scale), imagePaint)
+            }
         }
     }
 

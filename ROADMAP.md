@@ -16,7 +16,7 @@ Status: DONE / NEXT / LATER / SKIP (with reason)
 | Calligraphy nib (angle, flatness) | Width follows direction against the nib angle | DONE |
 | Pencil (grain) | Fixed grey texture only; real grain ghosts on e-ink | LATER |
 | Ink colours / brush packs (glitter, rainbow) | Greys only; colour brushes need a colour panel | SKIP |
-| Partial eraser (split strokes) | Segment subtraction | LATER |
+| Partial eraser (split strokes) | Segment subtraction; erase options: whole stroke or partial, three sizes; undoable | DONE |
 | Shape recognition (hold to snap) | Own multi-fitter detector (line, arrow, ellipse/circle, rectangle/square, triangle, polygon); snap is a proposal, moving the pen cancels it | DONE |
 | Shape tool + editable shapes | Drag out line, arrow, rectangle, ellipse, triangle; shapes select, move and resize like any item | DONE |
 | Ruler / straight edge | Edge overlay | LATER |
@@ -27,8 +27,8 @@ Status: DONE / NEXT / LATER / SKIP (with reason)
 |---|---|---|
 | Selection (lasso, tap), move, resize, delete | Item model + transform commands, all undoable | DONE |
 | Copy / cut / paste / duplicate, across pages | In-app clipboard of items | DONE |
-| Text boxes (typed) | On-screen keyboard, simple fonts | LATER |
-| Images | Pick from files, move/resize | LATER |
+| Text boxes (typed) | Tap with the Text tool, type in a dialog, move/resize like any item, Edit button; size, ink, bold | DONE |
+| Images | Pick from files, stored once by hash, shown in grey, move/resize, in PDF export | DONE |
 | Tape (hide text for study) | Grey mask items | LATER |
 | Stickers | Small bundled set | SKIP (low value on e-ink) |
 
@@ -38,10 +38,10 @@ Status: DONE / NEXT / LATER / SKIP (with reason)
 | PDF import | PdfRenderer, per-page backgrounds | DONE |
 | PDF export with ink | New PDF: original page as a 150 dpi picture, ink as vector | DONE |
 | Paper templates (blank, ruled, grid, dots) | Drawn in code | DONE |
-| More templates (Cornell, planner, music staff...) | Drawn in code | LATER |
+| More templates (narrow ruled, Cornell, music staff) | Drawn in code | DONE (planner LATER) |
 | Page manager (thumbnails, reorder, delete, duplicate, blank page) | Thumbnail grid, tap the page counter | DONE |
 | Library of notebooks | Home screen: thumbnails, new, rename, delete, PDF into its own notebook | DONE (folders LATER) |
-| Bookmarks, outline, jump to page | Page list | LATER |
+| Bookmarks, jump to page | Star in the Pages grid, next bookmark, go to number | DONE (outline LATER) |
 | Backup / restore / share | Export a notebook bundle | LATER |
 | Cloud sync, account, subscriptions | Not wanted | SKIP |
 

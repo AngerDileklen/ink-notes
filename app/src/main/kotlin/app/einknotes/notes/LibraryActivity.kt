@@ -174,9 +174,15 @@ class LibraryActivity : Activity() {
             .setPositiveButton("Delete") { _, _ ->
                 for (f in dir.listFiles() ?: emptyArray()) if (f.name.startsWith(e.id + ".")) f.delete()
                 // PDFs that no remaining notebook uses can go too
-                val used = HashSet<String>()
-                for (x in entries()) try { NoteStore.load(x.file).pages.forEach { p -> p.pdfFile?.let { used.add(it) } } } catch (_: Throwable) { }
+                val used = HashSet<String>(); val usedImages = HashSet<String>()
+                for (x in entries()) try {
+                    NoteStore.load(x.file).pages.forEach { p ->
+                        p.pdfFile?.let { used.add(it) }
+                        p.items.forEach { item -> if (item is ImageItem) usedImages.add(item.file) }
+                    }
+                } catch (_: Throwable) { }
                 pdfs.collectGarbage(used)
+                ImageStore.init(this); ImageStore.collectGarbage(usedImages)
                 refresh()
             }
             .setNegativeButton("Keep", null).show()

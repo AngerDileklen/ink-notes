@@ -54,7 +54,7 @@ class PagesPanel(
             val label = cell.getChildAt(1) as TextView
             img.setImageBitmap(cache[page])
             if (cache[page] == null) load(page)
-            label.text = "${position + 1}" + if (position == ink.pageIndex) "  (current)" else ""
+            label.text = (if (page.bookmarked) "★ " else "") + "${position + 1}" + if (position == ink.pageIndex) "  (current)" else ""
             label.typeface = if (position == selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             cell.background = GradientDrawable().apply {
                 setColor(Color.WHITE)
@@ -91,6 +91,11 @@ class PagesPanel(
         bar2.addView(button("Move later") { move(1) }, weight())
         bar2.addView(button("Blank page after") { ink.insertBlankAfter(selected); clearCache(); selected += 1; refresh() }, weight())
         addView(bar2)
+        val bar3 = LinearLayout(context).apply { orientation = HORIZONTAL }
+        bar3.addView(button("Bookmark on/off") { toggleBookmark() }, weight())
+        bar3.addView(button("Next bookmark") { nextBookmark() }, weight())
+        bar3.addView(button("Go to number...") { goToNumber() }, weight())
+        addView(bar3)
     }
 
     /** Shows the panel for the page being viewed. */
@@ -120,6 +125,37 @@ class PagesPanel(
                 selected = selected.coerceIn(0, note.pages.size - 1); refresh()
             }
             .setNegativeButton("Keep", null).show()
+    }
+
+    private fun toggleBookmark() {
+        val p = note.pages.getOrNull(selected) ?: return
+        p.bookmarked = !p.bookmarked
+        ink.markChanged()
+        refresh()
+    }
+
+    /** Selects the next bookmarked page after the selected one, wrapping around. */
+    private fun nextBookmark() {
+        val n = note.pages.size
+        for (k in 1..n) {
+            val i = (selected + k) % n
+            if (note.pages[i].bookmarked) { selected = i; refresh(); grid.setSelection(i); return }
+        }
+    }
+
+    private fun goToNumber() {
+        val input = android.widget.EditText(context).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            hint = "1 - ${note.pages.size}"
+        }
+        android.app.AlertDialog.Builder(context)
+            .setTitle("Go to page")
+            .setView(input)
+            .setPositiveButton("Go") { _, _ ->
+                val n = input.text.toString().toIntOrNull()
+                if (n != null && n in 1..note.pages.size) onOpen(n - 1)
+            }
+            .setNegativeButton("Cancel", null).show()
     }
 
     private fun move(delta: Int) {

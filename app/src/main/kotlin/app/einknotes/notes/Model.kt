@@ -1,6 +1,10 @@
 package app.einknotes.notes
 
 import android.graphics.Matrix
+import android.graphics.Typeface
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -11,13 +15,13 @@ const val PAGE_W = 1404f
 const val PAGE_H = 1872f
 
 /** What the pen does when it touches the page. */
-enum class Tool { PEN, HIGHLIGHTER, CALLIGRAPHY, ERASER, SELECT, SHAPE, HAND }
+enum class Tool { PEN, HIGHLIGHTER, CALLIGRAPHY, ERASER, SELECT, SHAPE, HAND, TEXT }
 
 /** How a stroke looks. */
 enum class Brush { PEN, HIGHLIGHTER, CALLIGRAPHY }
 
 enum class Paper(val label: String) {
-    BLANK("blank"), RULED("ruled"), GRID("grid"), DOTS("dots");
+    BLANK("blank"), RULED("ruled"), GRID("grid"), DOTS("dots"), NARROW("narrow ruled"), CORNELL("Cornell notes"), MUSIC("music staff");
 
     fun next() = values()[(ordinal + 1) % values().size]
 }
@@ -98,6 +102,55 @@ class Stroke(
         var inside = 0
         for (i in 0 until n) if (pointInPolygon(xs[i], ys[i], poly)) inside++
         return inside / n.toFloat()
+    }
+
+    /**
+     * Removes the part of the stroke that lies inside the circle (cx, cy, r) and returns what is left as new
+     * strokes (the stroke may be split in two or more). Returns null if the circle does not touch the stroke.
+     */
+    fun eraseCircle(cx: Float, cy: Float, r: Float): List<Stroke>? {
+        if (n == 0 || !near(cx, cy, r)) return null
+        val runs = ArrayList<FloatArray>()      // each run: x,y,p triples
+        var cur = ArrayList<Float>()
+        var touched = false
+        fun flush() { if (cur.size >= 6) runs.add(cur.toFloatArray()); cur = ArrayList() }
+        fun inside(i: Int): Boolean { val dx = xs[i] - cx; val dy = ys[i] - cy; return dx * dx + dy * dy <= r * r }
+        for (i in 0 until n) {
+            val insideNow = inside(i)
+            if (i > 0) {
+                // does the segment from the previous point cross the circle even though both ends are outside?
+                val ax = xs[i - 1]; val ay = ys[i - 1]; val bx = xs[i]; val by = ys[i]
+                val dx = bx - ax; val dy = by - ay
+                val fx = ax - cx; val fy = ay - cy
+                val a = dx * dx + dy * dy; val b = 2 * (fx * dx + fy * dy); val c = fx * fx + fy * fy - r * r
+                val disc = b * b - 4 * a * c
+                if (a > 0f && disc > 0f) {
+                    val sq = sqrt(disc)
+                    val t0 = (-b - sq) / (2 * a); val t1 = (-b + sq) / (2 * a)
+                    val enter = t0 in 0f..1f; val leave = t1 in 0f..1f
+                    if (enter || leave) {
+                        touched = true
+                        val p0 = ps[i - 1]; val p1 = ps[i]
+                        if (enter && !inside(i - 1)) {                 // path runs into the circle: end the run at the edge
+                            cur.add(ax + dx * t0); cur.add(ay + dy * t0); cur.add(p0 + (p1 - p0) * t0)
+                            flush()
+                        }
+                        if (leave && !insideNow) {                     // path comes out the other side: start a new run there
+                            cur = ArrayList()
+                            cur.add(ax + dx * t1); cur.add(ay + dy * t1); cur.add(p0 + (p1 - p0) * t1)
+                        }
+                    }
+                }
+            }
+            if (insideNow) { touched = true; flush() }
+            else { cur.add(xs[i]); cur.add(ys[i]); cur.add(ps[i]) }
+        }
+        flush()
+        if (!touched) return null
+        return runs.map { run ->
+            val k = run.size / 3
+            Stroke(brush, gray, widthScale, FloatArray(k) { run[it * 3] }, FloatArray(k) { run[it * 3 + 1] }, FloatArray(k) { run[it * 3 + 2] }, nibAngle, nibFlat)
+        }
     }
 
     private fun dist(ax: Float, ay: Float, bx: Float, by: Float): Float {
@@ -214,6 +267,95 @@ class ShapeItem(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Text boxes
+// ---------------------------------------------------------------------------------------------
+
+/** Typed text in a box. [x],[y] is the top-left corner, [boxW] the wrapping width, [size] the font size, all in page units. */
+class TextItem(
+    text: String, var x: Float, var y: Float, var boxW: Float, var size: Float,
+    var gray: Int = 0, var bold: Boolean = false
+) : Item() {
+    var text: String = text
+        set(v) { field = v; layoutCache = null; recomputeBounds() }
+
+    private var layoutCache: StaticLayout? = null
+    private var cachedKey = ""
+
+    init { recomputeBounds() }
+
+    fun layout(): StaticLayout {
+        val key = "$text|$boxW|$size|$bold|$gray"
+        layoutCache?.let { if (key == cachedKey) return it }
+        val paint = TextPaint().apply {
+            isAntiAlias = true
+            color = android.graphics.Color.rgb(gray, gray, gray)
+            textSize = size
+            typeface = if (bold) Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD) else Typeface.SANS_SERIF
+        }
+        val l = StaticLayout.Builder.obtain(text.ifEmpty { " " }, 0, text.ifEmpty { " " }.length, paint, max(boxW.toInt(), 20))
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL).setLineSpacing(0f, 1.15f).setIncludePad(false).build()
+        layoutCache = l; cachedKey = key
+        return l
+    }
+
+    override fun recomputeBounds() {
+        layoutCache = null
+        minX = x; minY = y; maxX = x + boxW; maxY = y + layout().height.toFloat()
+    }
+
+    override fun hit(x: Float, y: Float, r: Float) = x >= minX - r && x <= maxX + r && y >= minY - r && y <= maxY + r
+
+    override fun transform(m: Matrix) {
+        val p = floatArrayOf(x, y, x + boxW, y)
+        m.mapPoints(p)
+        x = min(p[0], p[2]); y = p[1]
+        boxW = kotlin.math.abs(p[2] - p[0]).coerceAtLeast(30f)
+        size = (size * m.mapRadius(1f)).coerceIn(8f, 400f)
+        recomputeBounds()
+    }
+
+    override fun copy(): Item = TextItem(text, x, y, boxW, size, gray, bold)
+
+    override fun fractionInside(poly: FloatArray): Float {
+        val cx = (minX + maxX) / 2f; val cy = (minY + maxY) / 2f
+        val pts = floatArrayOf(minX, minY, maxX, minY, maxX, maxY, minX, maxY, cx, cy)
+        var inside = 0
+        for (i in 0 until 5) if (pointInPolygon(pts[i * 2], pts[i * 2 + 1], poly)) inside++
+        return inside / 5f
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------------------------
+
+/** A picture stored in the app ([file]) placed in the rectangle (l,t)-(r,b) in page units. */
+class ImageItem(val file: String, var l: Float, var t: Float, var r: Float, var b: Float, val srcW: Int, val srcH: Int) : Item() {
+    init { recomputeBounds() }
+
+    override fun recomputeBounds() { minX = min(l, r); maxX = max(l, r); minY = min(t, b); maxY = max(t, b) }
+
+    override fun hit(x: Float, y: Float, r: Float) = x >= minX - r && x <= maxX + r && y >= minY - r && y <= maxY + r
+
+    override fun transform(m: Matrix) {
+        val p = floatArrayOf(l, t, r, b)
+        m.mapPoints(p)
+        l = p[0]; t = p[1]; r = p[2]; b = p[3]
+        recomputeBounds()
+    }
+
+    override fun copy(): Item = ImageItem(file, l, t, r, b, srcW, srcH)
+
+    override fun fractionInside(poly: FloatArray): Float {
+        val cx = (minX + maxX) / 2f; val cy = (minY + maxY) / 2f
+        val pts = floatArrayOf(minX, minY, maxX, minY, maxX, maxY, minX, maxY, cx, cy)
+        var inside = 0
+        for (i in 0 until 5) if (pointInPolygon(pts[i * 2], pts[i * 2 + 1], poly)) inside++
+        return inside / 5f
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Pages and notebooks
 // ---------------------------------------------------------------------------------------------
 
@@ -229,6 +371,9 @@ class PageData(var paper: Paper = Paper.RULED) {
     var pdfPage: Int = 0
 
     val isPdf get() = pdfFile != null
+
+    /** A page marked for quick return (shown with a star in the Pages screen). */
+    var bookmarked = false
 }
 
 class NoteData(var title: String = "Notebook", var created: Long = System.currentTimeMillis()) {
@@ -266,4 +411,7 @@ sealed class Cmd(val page: PageData) {
 
     /** [m] has already been applied to [items]; undo applies its inverse. */
     class Transform(page: PageData, val items: List<Item>, val m: Matrix) : Cmd(page)
+
+    /** Anything else: the page's items before and after (for partial erasing), or a custom edit (text). */
+    class Custom(page: PageData, val undoAction: () -> Unit, val redoAction: () -> Unit) : Cmd(page)
 }

@@ -19,7 +19,9 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.text.InputType
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -60,6 +62,8 @@ class NotesActivity : Activity(), InkView.Host {
     private lateinit var undoBtn: Button
     private lateinit var redoBtn: Button
     private lateinit var pageLabel: Button
+    private lateinit var zoomBtn: Button
+    private lateinit var editBtn: Button
     private lateinit var settingsPanel: LinearLayout
     private lateinit var pagesPanel: PagesPanel
     private lateinit var inkModeBtn: Button
@@ -123,6 +127,7 @@ class NotesActivity : Activity(), InkView.Host {
         rotateBackups()
         note = NoteStore.load(file)
         pdfs = PdfLibrary(this)
+        ImageStore.init(this)
         ink = InkView(this, note, pdfs, this)
         ink.sideButtonTool = Tool.values().getOrElse(prefs.getInt("side", Tool.ERASER.ordinal)) { Tool.ERASER }
         loadToolSettings()
@@ -130,19 +135,19 @@ class NotesActivity : Activity(), InkView.Host {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
         val row1 = row()
         for ((tool, label) in listOf(Tool.PEN to "Pen", Tool.HIGHLIGHTER to "Marker",
-            Tool.ERASER to "Erase", Tool.SELECT to "Select", Tool.SHAPE to "Shape", Tool.HAND to "Hand")) {
+            Tool.ERASER to "Erase", Tool.SELECT to "Select", Tool.SHAPE to "Shape", Tool.TEXT to "Text", Tool.HAND to "Hand")) {
             val b = tb(label) { onToolTapped(tool) }
             toolButtons[tool] = b
             row1.addView(b, weight())
         }
         undoBtn = tb("Undo") { ink.undo() }
         redoBtn = tb("Redo") { ink.redo() }
-        row1.addView(undoBtn, weight()); row1.addView(redoBtn, weight())
+        row1.addView(undoBtn, weight())
         val row2 = row()
         pageLabel = tb("1/1") { showPages() }
+        zoomBtn = tb("Zoom") { ink.cycleZoom(); refreshChrome() }
         for (b in listOf(tb("<") { goPage(-1) }, pageLabel, tb(">") { goPage(1) }, tb("+ Page") { ink.addPageAfterCurrent() },
-            tb("Zoom -") { ink.zoomBy(-1) }, tb("Zoom +") { ink.zoomBy(1) },
-            tb("Refresh") { eink.fullRefresh() }, tb("More") { showSettings() })) row2.addView(b, weight())
+            zoomBtn, redoBtn, tb("Refresh") { eink.fullRefresh() }, tb("More") { showSettings() })) row2.addView(b, weight())
         root.addView(row1); root.addView(row2)
 
         // the page, with floating bars on top so showing them never resizes (and re-renders) the page
@@ -221,7 +226,7 @@ class NotesActivity : Activity(), InkView.Host {
     /** Tapping the active tool again opens its options; tapping another tool switches to it. */
     private fun onToolTapped(t: Tool) {
         val current = if (ink.tool == Tool.CALLIGRAPHY) Tool.PEN else ink.tool
-        if (current == t && (t == Tool.PEN || t == Tool.HIGHLIGHTER || t == Tool.SHAPE)) {
+        if (current == t && (t == Tool.PEN || t == Tool.HIGHLIGHTER || t == Tool.SHAPE || t == Tool.ERASER || t == Tool.TEXT)) {
             if (optionsBar.visibility == View.VISIBLE) optionsBar.visibility = View.GONE else showOptions(t)
         } else selectTool(t)
     }
@@ -266,6 +271,18 @@ class NotesActivity : Activity(), InkView.Host {
                     cycle("Nib", flatNames, { idx(flatValues, s.calFlat) }) { s.calFlat = flatValues[it] }
                 }
             }
+            Tool.ERASER -> {
+                val modes = listOf("Whole stroke", "Partial")
+                cycle("Erase", modes, { if (s.eraserPartial) 1 else 0 }) { s.eraserPartial = it == 1 }
+                val sizes = listOf(10f, 18f, 32f)
+                cycle("Size", listOf("Small", "Medium", "Large"), { idx(sizes, s.eraserRadius) }) { s.eraserRadius = sizes[it] }
+            }
+            Tool.TEXT -> {
+                val sizes = listOf(28f, 38f, 52f, 72f)
+                cycle("Size", listOf("Small", "Medium", "Large", "Huge"), { idx(sizes, s.textSize) }) { s.textSize = sizes[it] }
+                cycle("Ink", penGrayNames, { idxI(penGrayValues, s.textGray) }) { s.textGray = penGrayValues[it] }
+                cycle("Bold", listOf("Off", "On"), { if (s.textBold) 1 else 0 }) { s.textBold = it == 1 }
+            }
             Tool.SHAPE -> {
                 val kinds = UserShape.values().toList()
                 cycle("Shape", kinds.map { it.label }, { kinds.indexOf(s.shapeTool) }) { s.shapeTool = kinds[it] }
@@ -288,6 +305,8 @@ class NotesActivity : Activity(), InkView.Host {
         s.calWidth = p.getFloat("calWidth", s.calWidth); s.calGray = p.getInt("calGray", s.calGray)
         s.calAngle = p.getFloat("calAngle", s.calAngle); s.calFlat = p.getFloat("calFlat", s.calFlat)
         s.shapeSnap = p.getBoolean("shapeSnap", true)
+        s.eraserPartial = p.getBoolean("eraserPartial", false); s.eraserRadius = p.getFloat("eraserRadius", 18f)
+        s.textSize = p.getFloat("textSize", 38f); s.textGray = p.getInt("textGray", 0); s.textBold = p.getBoolean("textBold", false)
         s.shapeTool = UserShape.values().getOrElse(p.getInt("shapeTool", UserShape.RECT.ordinal)) { UserShape.RECT }
     }
 
@@ -296,6 +315,8 @@ class NotesActivity : Activity(), InkView.Host {
         prefs.edit().putFloat("penWidth", s.penWidth).putInt("penGray", s.penGray).putFloat("hlWidth", s.hlWidth)
             .putInt("hlGray", s.hlGray).putFloat("calWidth", s.calWidth).putInt("calGray", s.calGray)
             .putFloat("calAngle", s.calAngle).putFloat("calFlat", s.calFlat)
+            .putBoolean("eraserPartial", s.eraserPartial).putFloat("eraserRadius", s.eraserRadius)
+            .putFloat("textSize", s.textSize).putInt("textGray", s.textGray).putBoolean("textBold", s.textBold)
             .putBoolean("shapeSnap", s.shapeSnap).putInt("shapeTool", s.shapeTool.ordinal).apply()
     }
 
@@ -310,8 +331,9 @@ class NotesActivity : Activity(), InkView.Host {
         pasteBtn = tb("Paste") { ink.paste(Clipboard.items) }
         val all = tb("All") { ink.selectAll() }
         val done = tb("Done") { ink.clearSelection() }
+        editBtn = tb("Edit") { editSelectedText() }
         selectionButtons = listOf(del, copy, cut, dup, done)
-        for (b in listOf(all, del, copy, cut, dup, pasteBtn, done)) bar.addView(b, weight())
+        for (b in listOf(all, del, copy, cut, dup, pasteBtn, editBtn, done)) bar.addView(b, weight())
         return bar
     }
 
@@ -320,14 +342,61 @@ class NotesActivity : Activity(), InkView.Host {
         val has = ink.hasSelection
         for (b in selectionButtons) b.alpha = if (has) 1f else 0.35f
         pasteBtn.alpha = if (Clipboard.items.isNotEmpty()) 1f else 0.35f
+        editBtn.alpha = if (ink.selectedText() != null) 1f else 0.35f
     }
 
     override fun onSelectionChanged() { updateSelectionBar() }
+
+    override fun onTextRequested(x: Float, y: Float, existing: TextItem?) {
+        showTextDialog(existing?.text ?: "") { text ->
+            if (existing != null) ink.updateText(existing, text) else ink.addText(text, x, y)
+            selectTool(Tool.SELECT)          // the new text box stays selected, ready to move or resize
+        }
+    }
+
+    private fun editSelectedText() {
+        val t = ink.selectedText() ?: return
+        showTextDialog(t.text) { ink.updateText(t, it) }
+    }
+
+    private fun showTextDialog(initial: String, onDone: (String) -> Unit) {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            minLines = 3; gravity = Gravity.TOP; textSize = 20f
+            setText(initial); setSelection(initial.length)
+        }
+        AlertDialog.Builder(this).setTitle("Text").setView(input)
+            .setPositiveButton("OK") { _, _ -> onDone(input.text.toString()) }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    // ---- images ------------------------------------------------------------------------------
+
+    private val REQ_IMAGE = 42
+
+    private fun pickImage() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "image/*" }
+        try { startActivityForResult(i, REQ_IMAGE) }
+        catch (_: Throwable) { Toast.makeText(this, "No file picker found on this tablet", Toast.LENGTH_LONG).show() }
+    }
+
+    private fun importImage(uri: Uri) {
+        hideSettings()
+        thread(name = "image-import") {
+            try {
+                val img = ImageStore.importFrom(this, uri)
+                ui.post { ink.insertImage(img); selectTool(Tool.SELECT) }
+            } catch (e: Throwable) {
+                ui.post { Toast.makeText(this, e.message ?: "Could not use that picture", Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
 
     private fun refreshChrome() {
         pageLabel.text = "${ink.pageIndex + 1}/${note.pages.size}"
         undoBtn.alpha = if (ink.canUndo) 1f else 0.35f
         redoBtn.alpha = if (ink.canRedo) 1f else 0.35f
+        zoomBtn.text = "Zoom " + ink.zoomLabel()
         if (::paperBtn.isInitialized) {
             inkModeBtn.text = "Ink mode: " + presets[presetIndex].first
             polishBtn.text = "Polish after writing: " + (if (polish) "on" else "off")
@@ -358,6 +427,7 @@ class NotesActivity : Activity(), InkView.Host {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_PDF && resultCode == RESULT_OK) data?.data?.let { importPdf(it) }
+        if (requestCode == REQ_IMAGE && resultCode == RESULT_OK) data?.data?.let { importImage(it) }
     }
 
     /** "Open with Ink Notes" from a file manager, or a PDF shared to the app. */
@@ -470,6 +540,7 @@ class NotesActivity : Activity(), InkView.Host {
             tb("Back to library") { save(); finish() },
             tb("Import PDF into this notebook...") { pickPdf() },
             tb("Delete this page") { confirmDeletePage() },
+            tb("Insert image...") { pickImage() },
             tb("Export notebook as PDF") { exportPdf() },
             tb("Full screen refresh now") { eink.fullRefresh(); hideSettings() },
             tb("Open device test tools (Probe)") { save(); startActivity(Intent(this, ProbeActivity::class.java)) },
@@ -561,7 +632,7 @@ class NotesActivity : Activity(), InkView.Host {
 
     // ---- keys --------------------------------------------------------------------------------
 
-    private val toolCycle = listOf(Tool.PEN, Tool.HIGHLIGHTER, Tool.ERASER, Tool.SELECT, Tool.SHAPE, Tool.HAND)
+    private val toolCycle = listOf(Tool.PEN, Tool.HIGHLIGHTER, Tool.ERASER, Tool.SELECT, Tool.SHAPE, Tool.TEXT, Tool.HAND)
 
     override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
         val code = ev.keyCode
@@ -662,6 +733,11 @@ class NotesActivity : Activity(), InkView.Host {
                     "tool_marker" -> selectTool(Tool.HIGHLIGHTER)
                     "tool_calli" -> { selectTool(Tool.PEN); ink.tool = Tool.CALLIGRAPHY }
                     "tool_shape" -> selectTool(Tool.SHAPE)
+                    "tool_text" -> selectTool(Tool.TEXT)
+                    "text" -> ink.addText(i.getStringExtra("t") ?: "Hello", i.getFloatExtra("x", 200f), i.getFloatExtra("y", 400f))
+                    "image_path" -> i.getStringExtra("path")?.let { importImage(Uri.fromFile(File(it))) }
+                    "eraser_partial" -> { ink.settings.eraserPartial = i.getBooleanExtra("v", true); ink.settings.eraserRadius = i.getFloatExtra("r", 18f) }
+                    "paper" -> Paper.values().firstOrNull { it.name == i.getStringExtra("v") }?.let { ink.setPaper(it); refreshChrome() }
                     "shape_kind" -> UserShape.values().firstOrNull { it.name == i.getStringExtra("v") }?.let { ink.settings.shapeTool = it }
                     "snap" -> { ink.settings.shapeSnap = i.getBooleanExtra("v", true); saveToolSettings() }
                     "tool_erase" -> selectTool(Tool.ERASER)

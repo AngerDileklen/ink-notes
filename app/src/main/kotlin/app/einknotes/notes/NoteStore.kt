@@ -15,18 +15,22 @@ import java.io.FileOutputStream
  *   "INKN" | version int
  *   v3:  title utf | created long | modified long
  *   pageCount int
- *   per page:   paper int | width float | height float | hasPdf byte [pdfName utf | pdfPage int] | itemCount int
+ *   per page:   paper int | width float | height float | hasPdf byte [pdfName utf | pdfPage int] | v4: flags byte (bit0 bookmarked) | itemCount int
  *   per item (v3): type byte, then the item's data
  *      type 1 stroke: brush byte | gray int | widthScale float | nibAngle float | nibFlat float | n int | n*(x,y,pressure)
  *      type 2 shape:  kind byte | closed byte | gray int | widthScale float | n int | n floats
+ *      type 3 text:   text utf | x,y,boxW,size floats | gray int | bold byte
+ *      type 4 image:  file utf | l,t,r,b floats | srcW int | srcH int
  *   (v1/v2 items are strokes without a type byte; v1 pages have no size or pdf fields)
  */
 object NoteStore {
     private const val MAGIC = 0x494E4B4E   // "INKN"
-    private const val VERSION = 3
+    private const val VERSION = 4
 
     const val ITEM_STROKE = 1
     const val ITEM_SHAPE = 2
+    const val ITEM_TEXT = 3
+    const val ITEM_IMAGE = 4
 
     class Header(val title: String, val created: Long, val modified: Long, val pageCount: Int)
 
@@ -44,6 +48,7 @@ object NoteStore {
                 val pdf = page.pdfFile
                 out.writeByte(if (pdf != null) 1 else 0)
                 if (pdf != null) { out.writeUTF(pdf); out.writeInt(page.pdfPage) }
+                out.writeByte(if (page.bookmarked) 1 else 0)
                 out.writeInt(page.items.size)
                 for (item in page.items) writeItem(out, item)
             }
@@ -67,6 +72,18 @@ object NoteStore {
                 out.writeInt(item.gray); out.writeFloat(item.widthScale)
                 out.writeInt(item.pts.size)
                 for (v in item.pts) out.writeFloat(v)
+            }
+            is TextItem -> {
+                out.writeByte(ITEM_TEXT)
+                out.writeUTF(item.text)
+                out.writeFloat(item.x); out.writeFloat(item.y); out.writeFloat(item.boxW); out.writeFloat(item.size)
+                out.writeInt(item.gray); out.writeByte(if (item.bold) 1 else 0)
+            }
+            is ImageItem -> {
+                out.writeByte(ITEM_IMAGE)
+                out.writeUTF(item.file)
+                out.writeFloat(item.l); out.writeFloat(item.t); out.writeFloat(item.r); out.writeFloat(item.b)
+                out.writeInt(item.srcW); out.writeInt(item.srcH)
             }
             else -> throw IllegalStateException("unknown item type ${item.javaClass.simpleName}")
         }
@@ -103,7 +120,7 @@ object NoteStore {
             DataInputStream(BufferedInputStream(FileInputStream(file), 1 shl 16)).use { inp ->
                 require(inp.readInt() == MAGIC) { "not a notebook file" }
                 val version = inp.readInt()
-                require(version in 1..3) { "unknown notebook version" }
+                require(version in 1..4) { "unknown notebook version" }
                 val note = if (version >= 3) {
                     val title = inp.readUTF(); val created = inp.readLong(); val modified = inp.readLong()
                     NoteData(title, created).also { it.modified = modified }
@@ -117,6 +134,7 @@ object NoteStore {
                         page.w = inp.readFloat(); page.h = inp.readFloat()
                         if (inp.readByte().toInt() == 1) { page.pdfFile = inp.readUTF(); page.pdfPage = inp.readInt() }
                     }
+                    if (version >= 4) page.bookmarked = (inp.readByte().toInt() and 1) != 0
                     val count = inp.readInt()
                     repeat(count) { readItem(inp, version)?.let { page.items.add(it) } }
                     note.pages.add(page)
@@ -158,6 +176,17 @@ object NoteStore {
                 val n = inp.readInt()
                 val pts = FloatArray(n) { inp.readFloat() }
                 ShapeItem(kind, pts, closed, gray, ws)
+            }
+            ITEM_TEXT -> {
+                val text = inp.readUTF()
+                val x = inp.readFloat(); val y = inp.readFloat(); val w = inp.readFloat(); val size = inp.readFloat()
+                val gray = inp.readInt(); val bold = inp.readByte().toInt() == 1
+                TextItem(text, x, y, w, size, gray, bold)
+            }
+            ITEM_IMAGE -> {
+                val file = inp.readUTF()
+                val l = inp.readFloat(); val t = inp.readFloat(); val r = inp.readFloat(); val b = inp.readFloat()
+                ImageItem(file, l, t, r, b, inp.readInt(), inp.readInt())
             }
             else -> throw java.io.IOException("unknown item type $type")
         }
