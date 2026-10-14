@@ -15,7 +15,11 @@ import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import java.util.concurrent.Executors
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -41,7 +45,12 @@ class ToolSettings {
     var textSize = 38f
     var textGray = 0
     var textBold = false
+    /** Pen smoothing: 0 off, 1 light, 2 strong. */
+    var smoothing = 0
 }
+
+/** How far the pen position moves toward the real position at each sample, for smoothing off / light / strong. */
+private val SMOOTHING = floatArrayOf(1f, 0.55f, 0.3f)
 
 enum class UserShape(val label: String) { LINE("Line"), ARROW("Arrow"), RECT("Rectangle"), ELLIPSE("Ellipse"), TRIANGLE("Triangle") }
 
@@ -127,6 +136,61 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             postDelayed(this, 120)
         }
     }
+
+    // audio: items written while a recording runs remember which recording and when
+    var recId = 0
+    var recStart = 0L
+    private var strokeMs = 0
+    private fun recNow(): Int = if (recId > 0) (SystemClock.elapsedRealtime() - recStart).toInt() else 0
+    private fun stamp(item: Item, ms: Int = recNow()) { if (recId > 0) { item.recId = recId; item.recMs = ms } }
+
+    /** While a recording is replayed with "Replay" on, items of that recording written after [replayMs] stay hidden. */
+    private var replayRec = 0
+    private var replayMs = 0
+    /** Tapping an item with the Hand tool while a recording plays jumps the audio to when it was written. */
+    var onSeekItem: ((Item) -> Unit)? = null
+    private var handDownX = 0f
+    private var handDownY = 0f
+
+    private fun futureItems(): List<Item>? =
+        if (replayRec > 0) page.items.filter { it.recId == replayRec && it.recMs > replayMs } else null
+
+    fun setReplay(rec: Int, ms: Int) {
+        val before = futureItems()?.size ?: -1
+        replayRec = rec; replayMs = ms
+        val after = futureItems()?.size ?: -1
+        if (before != after) rebuild()
+    }
+
+    // smoothing: the pen position is eased toward the real one
+    private var smX = 0f
+    private var smY = 0f
+
+    // ruler: a straight edge you can move and turn; strokes that start beside it follow its edge
+    var rulerOn = false
+        set(v) { field = v; invalidate() }
+    private var rcx = PAGE_W / 2f
+    private var rcy = PAGE_H / 2f
+    private var rAngle = 0f
+    private val rLen = 1100f
+    private val rHalf = 46f
+    private var rGrab = 0                 // 0 none, 1 moving, 2 turning by the + end, 3 turning by the - end
+    private var rSide = 0                 // +1 / -1 while a stroke follows the ruler's edge
+    private var rDownX = 0f
+    private var rDownY = 0f
+    private var rStartX = 0f
+    private var rStartY = 0f
+    private var rLastDraw = 0L
+    private var projX = 0f
+    private var projY = 0f
+    private val rulerPaint = Paint().apply { style = Paint.Style.STROKE; color = Color.BLACK; strokeWidth = 3f; isAntiAlias = true }
+    private val rulerTick = Paint().apply { style = Paint.Style.STROKE; color = Color.rgb(60, 60, 60); strokeWidth = 2f }
+
+    // the Tape tool: drag out a patch, tap one to lift it
+    private var tapeDown = false
+    private var tapeX0 = 0f
+    private var tapeY0 = 0f
+    private var tapePreview: RectF? = null
 
     // the Shape tool: drag out a shape
     private var shapeStartX = 0f
@@ -450,6 +514,69 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         }
         if (selMode == SelMode.LASSO) canvas.drawPath(lasso, selDash)
         previewShape?.let { renderer.drawItem(canvas, it, scale, tx, ty) }
+        tapePreview?.let { canvas.drawRect(it, selDash) }
+        if (rulerOn) drawRuler(canvas)
+    }
+
+    private fun drawRuler(c: Canvas) {
+        c.save()
+        c.translate(tx + rcx * scale, ty + rcy * scale)
+        c.rotate(Math.toDegrees(rAngle.toDouble()).toFloat())
+        val hl = rLen / 2f * scale; val hh = rHalf * scale
+        c.drawRect(-hl, -hh, hl, hh, rulerPaint)
+        var k = 0
+        var x = -rLen / 2f
+        while (x <= rLen / 2f + 0.5f) {
+            val len = if (k % 5 == 0) 20f else 10f
+            val vx = x * scale
+            c.drawLine(vx, -hh, vx, -hh + len, rulerTick)
+            c.drawLine(vx, hh, vx, hh - len, rulerTick)
+            x += 20f; k++
+        }
+        // the two ends are for turning the ruler
+        for (s in intArrayOf(-1, 1)) c.drawCircle(s * (hl - 56f * scale), 0f, 12f * scale.coerceAtLeast(0.6f), rulerPaint)
+        c.restore()
+    }
+
+    private fun rulerZone(vx: Float, vy: Float): Int {
+        val px = (vx - tx) / scale - rcx; val py = (vy - ty) / scale - rcy
+        val ca = cos(rAngle); val sa = sin(rAngle)
+        val t = px * ca + py * sa
+        val d = -px * sa + py * ca
+        if (kotlin.math.abs(t) > rLen / 2f + 40f / scale) return 0
+        if (kotlin.math.abs(d) <= rHalf) return if (kotlin.math.abs(t) > rLen / 2f - 120f / scale) (if (t > 0) 2 else 3) else 1
+        if (kotlin.math.abs(d) - rHalf <= 70f / scale) return if (d > 0) 4 else 5
+        return 0
+    }
+
+    private fun projectToRuler(vx: Float, vy: Float) {
+        val px = (vx - tx) / scale - rcx; val py = (vy - ty) / scale - rcy
+        val ca = cos(rAngle); val sa = sin(rAngle)
+        val t = (px * ca + py * sa).coerceIn(-rLen / 2f, rLen / 2f)
+        val qx = rcx + ca * t - sa * rSide * rHalf
+        val qy = rcy + sa * t + ca * rSide * rHalf
+        projX = qx * scale + tx; projY = qy * scale + ty
+    }
+
+    private fun beginRulerGrab(zone: Int, vx: Float, vy: Float) {
+        rGrab = if (zone == 1) 1 else zone
+        rDownX = vx; rDownY = vy; rStartX = rcx; rStartY = rcy
+    }
+
+    private fun moveRuler(vx: Float, vy: Float) {
+        if (rGrab == 1) {
+            rcx = rStartX + (vx - rDownX) / scale; rcy = rStartY + (vy - rDownY) / scale
+        } else {
+            val px = (vx - tx) / scale - rcx; val py = (vy - ty) / scale - rcy
+            var a = atan2(py, px) + if (rGrab == 3) Math.PI.toFloat() else 0f
+            // turn in steps of 15 degrees when close to one
+            val step = (Math.PI / 12).toFloat()
+            val nearest = (a / step).roundToInt() * step
+            if (kotlin.math.abs(a - nearest) < 0.05f) a = nearest
+            rAngle = a
+        }
+        val now = SystemClock.uptimeMillis()
+        if (now - rLastDraw > 60) { rLastDraw = now; invalidate() }
     }
 
     /** Redraws paper, PDF and every item into the bitmap, then repaints the whole view. */
@@ -464,7 +591,9 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             renderer.drawBorder(c, page, scale, tx, ty)
         } else renderer.drawPaper(c, page, scale, tx, ty)
         // while the selection is being dragged it is drawn as a separate layer
-        val hide = if (selMode == SelMode.MOVE || selMode == SelMode.SCALE) selection else null
+        val dragged = if (selMode == SelMode.MOVE || selMode == SelMode.SCALE) selection else null
+        val future = futureItems()
+        val hide = if (future == null) dragged else if (dragged == null) future else future + dragged
         renderer.drawItems(c, page, scale, tx, ty, hide)
         invalidate()
     }
@@ -525,13 +654,27 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                 host.onPenDown()
                 lastVx = e.x; lastVy = e.y
                 when (active) {
-                    Tool.PEN, Tool.HIGHLIGHTER, Tool.CALLIGRAPHY -> { clearSelection(); beginStroke(active, e.x, e.y, e.pressure) }
+                    Tool.PEN, Tool.HIGHLIGHTER, Tool.CALLIGRAPHY -> {
+                        clearSelection()
+                        val zone = if (rulerOn) rulerZone(e.x, e.y) else 0
+                        when {
+                            zone in 1..3 -> beginRulerGrab(zone, e.x, e.y)
+                            zone >= 4 -> {
+                                rSide = if (zone == 4) 1 else -1
+                                projectToRuler(e.x, e.y)
+                                beginStroke(active, projX, projY, e.pressure)
+                                lastVx = projX; lastVy = projY
+                            }
+                            else -> beginStroke(active, e.x, e.y, e.pressure)
+                        }
+                    }
                     Tool.ERASER -> {
                         clearSelection(); erasing = true; erased.clear(); eraseLastX = e.x; eraseLastY = e.y
                         eraseBefore = page.items.toList(); partialDirty = false
                         eraseAt(e.x, e.y)
                     }
-                    Tool.HAND -> { panning = true; panLastX = e.x; panLastY = e.y }
+                    Tool.HAND -> { panning = true; panLastX = e.x; panLastY = e.y; handDownX = e.x; handDownY = e.y }
+                    Tool.TAPE -> { clearSelection(); tapeDown = true; tapeX0 = e.x; tapeY0 = e.y; tapePreview = null }
                     Tool.SELECT -> beginSelectGesture(e.x, e.y)
                     Tool.TEXT -> { clearSelection(); textDown = true; textDownX = e.x; textDownY = e.y }
                     Tool.SHAPE -> { clearSelection(); shapeStartX = e.x; shapeStartY = e.y; previewShape = null; previewRect = null; shapeDragging = true }
@@ -547,17 +690,27 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                         // The lift-off position is part of the stroke: without it every line ends a little short.
                         if (e.actionMasked == MotionEvent.ACTION_UP && snappedShape == null) {
                             for (i in 0 until e.historySize) move(e.getHistoricalX(i), e.getHistoricalY(i), e.getHistoricalPressure(i))
-                            finalPoint(e.x, e.y)
+                            if (rSide != 0) { projectToRuler(e.x, e.y); finalPoint(projX, projY) } else finalPoint(e.x, e.y)
                         }
                         endStroke()
                     }
+                    rGrab != 0 -> { rGrab = 0; invalidate() }
+                    tapeDown -> endTape(e.x, e.y, e.actionMasked == MotionEvent.ACTION_UP)
                     erasing -> endErase()
                     textDown -> {
                         textDown = false
                         if (hypot(e.x - textDownX, e.y - textDownY) < 16f && e.actionMasked == MotionEvent.ACTION_UP) requestText(e.x, e.y)
                     }
                     shapeDragging -> endShapeDrag()
-                    panning -> { panning = false; transformChanged(); rebuild() }
+                    panning -> {
+                        panning = false
+                        val seek = onSeekItem
+                        if (seek != null && e.actionMasked == MotionEvent.ACTION_UP && hypot(e.x - handDownX, e.y - handDownY) < 16f) {
+                            val px = (e.x - tx) / scale; val py = (e.y - ty) / scale
+                            page.items.lastOrNull { it.recId > 0 && it.near(px, py, 16f / scale) && it.hit(px, py, 16f / scale) }?.let(seek)
+                        }
+                        transformChanged(); rebuild()
+                    }
                     selMode != SelMode.NONE -> endSelectGesture(e.x, e.y)
                 }
                 host.onPenUp()
@@ -573,11 +726,14 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     private fun move(x: Float, y: Float, rawPressure: Float) {
         when {
+            rGrab != 0 -> moveRuler(x, y)
+            tapeDown -> dragTape(x, y)
             writing -> {
                 if (snappedShape != null) {
                     // A snap is only a proposal: if the pen moves away again, the person was not finished.
                     if (hypot(x - lastVx, y - lastVy) > 25f) cancelSnap(x, y, rawPressure)
-                } else addStrokePoint(x, y, rawPressure)
+                } else if (rSide != 0) { projectToRuler(x, y); addStrokePoint(projX, projY, rawPressure) }
+                else addStrokePoint(x, y, rawPressure)
             }
             tool == Tool.SHAPE && !erasing && !panning && selMode == SelMode.NONE && shapeDragging -> dragShape(x, y)
             erasing -> eraseAlong(x, y)
@@ -599,6 +755,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         brush = when (active) { Tool.HIGHLIGHTER -> Brush.HIGHLIGHTER; Tool.CALLIGRAPHY -> Brush.CALLIGRAPHY; else -> Brush.PEN }
         liveXs.clear(); liveYs.clear(); livePs.clear()
         writing = true
+        strokeMs = recNow(); smX = x; smY = y
         snappedShape = null; snapTried = false; lastMoveTime = SystemClock.uptimeMillis()
         removeCallbacks(holdCheck); postDelayed(holdCheck, 120)
         lastPressure = normalisePressure(rawPressure)
@@ -623,7 +780,9 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         lastVx = x; lastVy = y
         lastMoveTime = SystemClock.uptimeMillis(); snapTried = false
         lastPressure = 0.6f * lastPressure + 0.4f * normalisePressure(rawPressure)   // gentle pressure smoothing
-        pushPoint(x, y, lastPressure)
+        val a = if (rSide != 0) 1f else SMOOTHING[settings.smoothing.coerceIn(0, SMOOTHING.size - 1)]
+        smX += a * (x - smX); smY += a * (y - smY)
+        pushPoint(smX, smY, lastPressure)
         flushLive()
     }
 
@@ -631,7 +790,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private fun finalPoint(x: Float, y: Float) {
         val dx = x - lastVx; val dy = y - lastVy
         if (dx * dx + dy * dy < 0.25f) return
-        lastVx = x; lastVy = y
+        lastVx = x; lastVy = y; smX = x; smY = y
         pushPoint(x, y, lastPressure)
         flushLive()
     }
@@ -672,9 +831,11 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         if (snapped == null) { painter?.finish(); flushLive() }   // a replaced stroke must not draw any more ink
         painter = null
         writing = false
+        rSide = 0
         hlBase?.recycle(); hlBase = null
         if (snapped != null) {
             snappedShape = null
+            stamp(snapped, strokeMs)
             page.items.add(snapped)
             push(Cmd.Add(page, listOf(snapped)))
             host.onDocumentChanged()
@@ -683,6 +844,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         if (liveXs.size >= 1) {
             val s = Stroke(brush, grayFor(brush), widthFor(brush), liveXs.toArray(), liveYs.toArray(), livePs.toArray(),
                 settings.calAngle, settings.calFlat)
+            stamp(s, strokeMs)
             page.items.add(s)
             push(Cmd.Add(page, listOf(s)))
             host.onDocumentChanged()
@@ -701,6 +863,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         if (text.isBlank()) return
         val w = min(760f, page.w - x - 30f).coerceAtLeast(180f)
         val item = TextItem(text, x, y, w, settings.textSize, settings.textGray, settings.textBold)
+        stamp(item)
         page.items.add(item)
         push(Cmd.Add(page, listOf(item)))
         selection.clear(); selection.add(item)
@@ -725,6 +888,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         val cx = ((width / 2f - tx) / scale).coerceIn(w / 2f, page.w - w / 2f)
         val cy = ((height / 2f - ty) / scale).coerceIn(h / 2f, page.h - h / 2f)
         val item = ImageItem(img.name, cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f, img.width, img.height)
+        stamp(item)
         page.items.add(item)
         push(Cmd.Add(page, listOf(item)))
         selection.clear(); selection.add(item)
@@ -736,7 +900,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     /** The pen has been still long enough: if the stroke looks like a shape, replace it with the clean one. */
     private fun checkHold() {
         if (!settings.shapeSnap || snappedShape != null || snapTried) return
-        if (brush == Brush.HIGHLIGHTER) return
+        if (brush == Brush.HIGHLIGHTER || rSide != 0) return
         if (SystemClock.uptimeMillis() - lastMoveTime < settings.snapHoldMs) return
         snapTried = true
         if (liveXs.size < 6) return
@@ -796,11 +960,50 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         previewShape = null
         val region = previewRect; previewRect = null
         if (s != null && (s.maxX - s.minX) * scale > 14f || s != null && (s.maxY - s.minY) * scale > 14f) {
+            stamp(s)
             page.items.add(s)
             push(Cmd.Add(page, listOf(s)))
             host.onDocumentChanged()
             if (region != null) polish = polish?.also { it.union(region) } ?: Rect(region)
         }
+        rebuild()
+    }
+
+    // ---- tape --------------------------------------------------------------------------------
+
+    private fun dragTape(x: Float, y: Float) {
+        val old = tapePreview
+        val r = RectF(min(tapeX0, x), min(tapeY0, y), max(tapeX0, x), max(tapeY0, y))
+        tapePreview = r
+        val region = Rect(r.left.toInt() - 6, r.top.toInt() - 6, r.right.toInt() + 6, r.bottom.toInt() + 6)
+        if (old != null) region.union(Rect(old.left.toInt() - 6, old.top.toInt() - 6, old.right.toInt() + 6, old.bottom.toInt() + 6))
+        invalidate(region)
+    }
+
+    private fun endTape(x: Float, y: Float, up: Boolean) {
+        tapeDown = false
+        tapePreview = null
+        if (!up) { invalidate(); return }
+        val px0 = (tapeX0 - tx) / scale; val py0 = (tapeY0 - ty) / scale; val px1 = (x - tx) / scale; val py1 = (y - ty) / scale
+        if (hypot(x - tapeX0, y - tapeY0) < 24f) {
+            // a tap lifts the tape under the pen, or puts it back
+            val tape = page.items.lastOrNull { it is TapeItem && it.hit(px1, py1, 6f / scale) } as? TapeItem
+            if (tape != null) {
+                val now = !tape.covered
+                tape.covered = now
+                push(Cmd.Custom(page, { tape.covered = !now }, { tape.covered = now }))
+                host.onDocumentChanged()
+            }
+            rebuild()
+            return
+        }
+        val l = min(px0, px1); val r = max(px0, px1); val t = min(py0, py1); val b = max(py0, py1)
+        if (r - l < 20f || b - t < 12f) { rebuild(); return }
+        val item = TapeItem(l, t, r, b, true)
+        stamp(item)
+        page.items.add(item)
+        push(Cmd.Add(page, listOf(item)))
+        host.onDocumentChanged()
         rebuild()
     }
 

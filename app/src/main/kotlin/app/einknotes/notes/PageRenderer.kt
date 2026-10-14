@@ -47,6 +47,14 @@ class PageRenderer(private val forExport: Boolean = false) {
         colorFilter = android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix().apply { setSaturation(0f) })
     }
 
+    private val tapeFill = Paint().apply { color = Color.rgb(205, 205, 205); style = Paint.Style.FILL }
+    private val tapeHatch = Paint().apply { color = Color.rgb(150, 150, 150); strokeWidth = 2f; isAntiAlias = false }
+    private val tapeEdge = Paint().apply { color = Color.rgb(90, 90, 90); style = Paint.Style.STROKE; strokeWidth = 3f }
+    private val tapeLifted = Paint().apply {
+        color = Color.rgb(140, 140, 140); style = Paint.Style.STROKE; strokeWidth = 2f
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(10f, 8f), 0f)
+    }
+
     private val exportHighlighterPaint = Paint().apply {
         isAntiAlias = true; style = Paint.Style.STROKE; strokeJoin = Paint.Join.ROUND
     }
@@ -129,11 +137,25 @@ class PageRenderer(private val forExport: Boolean = false) {
                 item.layout().draw(c)
                 c.restore()
             }
+            is TapeItem -> drawTape(c, item, scale, tx, ty)
             is ImageItem -> {
                 val bmp = ImageStore.bitmap(item.file, ((item.maxX - item.minX) * scale).toInt()) ?: return
                 c.drawBitmap(bmp, null, RectF(tx + item.minX * scale, ty + item.minY * scale, tx + item.maxX * scale, ty + item.maxY * scale), imagePaint)
             }
         }
+    }
+
+    private fun drawTape(c: Canvas, t: TapeItem, scale: Float, tx: Float, ty: Float) {
+        val r = RectF(tx + t.minX * scale, ty + t.minY * scale, tx + t.maxX * scale, ty + t.maxY * scale)
+        if (!t.covered) { c.drawRect(r, tapeLifted); return }
+        c.drawRect(r, tapeFill)
+        c.save()
+        c.clipRect(r)
+        val step = 18f
+        var x = r.left - r.height()
+        while (x < r.right) { c.drawLine(x, r.bottom, x + r.height(), r.top, tapeHatch); x += step }
+        c.restore()
+        c.drawRect(r, tapeEdge)
     }
 
     private fun drawStroke(c: Canvas, s: Stroke, scale: Float, tx: Float, ty: Float) {

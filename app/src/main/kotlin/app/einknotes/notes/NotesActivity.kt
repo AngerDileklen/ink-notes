@@ -1,7 +1,9 @@
 package app.einknotes.notes
 
 import android.app.Activity
+import android.Manifest
 import android.app.AlertDialog
+import android.content.pm.PackageManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -64,6 +66,12 @@ class NotesActivity : Activity(), InkView.Host {
     private lateinit var pageLabel: Button
     private lateinit var zoomBtn: Button
     private lateinit var editBtn: Button
+    private lateinit var recBtn: Button
+    private lateinit var playBar: LinearLayout
+    private lateinit var playPauseBtn: Button
+    private lateinit var playPosBtn: Button
+    private lateinit var replayBtn: Button
+    private var replayOn = false
     private lateinit var settingsPanel: LinearLayout
     private lateinit var pagesPanel: PagesPanel
     private lateinit var inkModeBtn: Button
@@ -135,7 +143,7 @@ class NotesActivity : Activity(), InkView.Host {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
         val row1 = row()
         for ((tool, label) in listOf(Tool.PEN to "Pen", Tool.HIGHLIGHTER to "Marker",
-            Tool.ERASER to "Erase", Tool.SELECT to "Select", Tool.SHAPE to "Shape", Tool.TEXT to "Text", Tool.HAND to "Hand")) {
+            Tool.ERASER to "Erase", Tool.SELECT to "Select", Tool.SHAPE to "Shape", Tool.TEXT to "Text", Tool.TAPE to "Tape", Tool.HAND to "Hand")) {
             val b = tb(label) { onToolTapped(tool) }
             toolButtons[tool] = b
             row1.addView(b, weight())
@@ -146,8 +154,9 @@ class NotesActivity : Activity(), InkView.Host {
         val row2 = row()
         pageLabel = tb("1/1") { showPages() }
         zoomBtn = tb("Zoom") { ink.cycleZoom(); refreshChrome() }
+        recBtn = tb("Rec") { onRecTapped() }
         for (b in listOf(tb("<") { goPage(-1) }, pageLabel, tb(">") { goPage(1) }, tb("+ Page") { ink.addPageAfterCurrent() },
-            zoomBtn, redoBtn, tb("Refresh") { eink.fullRefresh() }, tb("More") { showSettings() })) row2.addView(b, weight())
+            zoomBtn, redoBtn, recBtn, tb("Refresh") { eink.fullRefresh() }, tb("More") { showSettings() })) row2.addView(b, weight())
         root.addView(row1); root.addView(row2)
 
         // the page, with floating bars on top so showing them never resizes (and re-renders) the page
@@ -155,6 +164,8 @@ class NotesActivity : Activity(), InkView.Host {
         pageArea.addView(ink, FrameLayout.LayoutParams(-1, -1))
         optionsBar = row().apply { visibility = View.GONE; setBackgroundColor(Color.WHITE) }
         pageArea.addView(optionsBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        playBar = buildPlayBar().also { it.visibility = View.GONE }
+        pageArea.addView(playBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
         selectionBar = buildSelectionBar().also { it.visibility = View.GONE }
         pageArea.addView(selectionBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
         root.addView(pageArea, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -264,11 +275,14 @@ class NotesActivity : Activity(), InkView.Host {
                 if (t == Tool.PEN) {
                     cycle("Width", widthNames, { idx(widthValues, s.penWidth) }) { s.penWidth = widthValues[it] }
                     cycle("Ink", penGrayNames, { idxI(penGrayValues, s.penGray) }) { s.penGray = penGrayValues[it] }
+                    cycle("Ruler", listOf("Off", "On"), { if (ink.rulerOn) 1 else 0 }) { ink.rulerOn = it == 1 }
+                    cycle("Smooth", listOf("Off", "Light", "Strong"), { s.smoothing }) { s.smoothing = it }
                 } else {
                     cycle("Width", widthNames, { idx(widthValues, s.calWidth) }) { s.calWidth = widthValues[it] }
                     cycle("Ink", penGrayNames, { idxI(penGrayValues, s.calGray) }) { s.calGray = penGrayValues[it] }
                     cycle("Angle", angleNames, { idx(angleValues, s.calAngle) }) { s.calAngle = angleValues[it] }
                     cycle("Nib", flatNames, { idx(flatValues, s.calFlat) }) { s.calFlat = flatValues[it] }
+                    cycle("Ruler", listOf("Off", "On"), { if (ink.rulerOn) 1 else 0 }) { ink.rulerOn = it == 1 }
                 }
             }
             Tool.ERASER -> {
@@ -292,6 +306,7 @@ class NotesActivity : Activity(), InkView.Host {
             Tool.HIGHLIGHTER -> {
                 cycle("Width", widthNames, { idx(widthValues, s.hlWidth) }) { s.hlWidth = widthValues[it] }
                 cycle("Tone", hlGrayNames, { idxI(hlGrayValues, s.hlGray) }) { s.hlGray = hlGrayValues[it] }
+                cycle("Ruler", listOf("Off", "On"), { if (ink.rulerOn) 1 else 0 }) { ink.rulerOn = it == 1 }
             }
             else -> return
         }
@@ -307,6 +322,7 @@ class NotesActivity : Activity(), InkView.Host {
         s.shapeSnap = p.getBoolean("shapeSnap", true)
         s.eraserPartial = p.getBoolean("eraserPartial", false); s.eraserRadius = p.getFloat("eraserRadius", 18f)
         s.textSize = p.getFloat("textSize", 38f); s.textGray = p.getInt("textGray", 0); s.textBold = p.getBoolean("textBold", false)
+        s.smoothing = p.getInt("smoothing", 0)
         s.shapeTool = UserShape.values().getOrElse(p.getInt("shapeTool", UserShape.RECT.ordinal)) { UserShape.RECT }
     }
 
@@ -317,6 +333,7 @@ class NotesActivity : Activity(), InkView.Host {
             .putFloat("calAngle", s.calAngle).putFloat("calFlat", s.calFlat)
             .putBoolean("eraserPartial", s.eraserPartial).putFloat("eraserRadius", s.eraserRadius)
             .putFloat("textSize", s.textSize).putInt("textGray", s.textGray).putBoolean("textBold", s.textBold)
+            .putInt("smoothing", s.smoothing)
             .putBoolean("shapeSnap", s.shapeSnap).putInt("shapeTool", s.shapeTool.ordinal).apply()
     }
 
@@ -368,6 +385,127 @@ class NotesActivity : Activity(), InkView.Host {
         AlertDialog.Builder(this).setTitle("Text").setView(input)
             .setPositiveButton("OK") { _, _ -> onDone(input.text.toString()) }
             .setNegativeButton("Cancel", null).show()
+    }
+
+    // ---- audio -------------------------------------------------------------------------------
+
+    private val REQ_MIC = 43
+    private val recTick = object : Runnable {
+        override fun run() { if (AudioNotes.active != null) { updateRecButton(); ui.postDelayed(this, 10000) } }
+    }
+    private val playTick = object : Runnable {
+        override fun run() {
+            val r = AudioNotes.playing ?: return
+            updatePlayUi()
+            ink.setReplay(if (replayOn) r.id else 0, AudioNotes.positionMs())
+            ui.postDelayed(this, 2000)
+        }
+    }
+
+    private fun onRecTapped() {
+        if (AudioNotes.active != null) { stopRecording(); return }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC)
+            return
+        }
+        startRecording()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_MIC) {
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) startRecording()
+            else Toast.makeText(this, "Recording needs the microphone permission", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun startRecording() {
+        stopPlaybackUi()
+        try {
+            val rec = AudioNotes.start(this, note)
+            ink.recId = rec.id; ink.recStart = AudioNotes.startedElapsed()
+            save()
+            updateRecButton()
+            ui.removeCallbacks(recTick); ui.postDelayed(recTick, 10000)
+        } catch (e: Throwable) {
+            Toast.makeText(this, "Could not start recording: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun stopRecording() {
+        ui.removeCallbacks(recTick)
+        AudioNotes.stopRecording(this, note)
+        ink.recId = 0
+        updateRecButton()
+        save()
+    }
+
+    private fun updateRecButton() {
+        val on = AudioNotes.active != null
+        recBtn.text = if (on) "Stop " + AudioNotes.clock(AudioNotes.elapsedMs()) else "Rec"
+        mark(recBtn, on)
+    }
+
+    private fun showRecordings() {
+        hideSettings()
+        if (note.recordings.isEmpty()) {
+            Toast.makeText(this, "No recordings yet. Tap Rec to start one; what you write meanwhile is linked to the sound.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val fmt = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.getDefault())
+        val labels = note.recordings.map { "Recording ${it.id}   ${AudioNotes.clock(it.durationMs)}   ${fmt.format(java.util.Date(it.startedAt))}" }
+        AlertDialog.Builder(this).setTitle("Audio recordings")
+            .setItems(labels.toTypedArray()) { _, i -> recordingMenu(note.recordings[i]) }
+            .setNegativeButton("Close", null).show()
+    }
+
+    private fun recordingMenu(r: Recording) {
+        AlertDialog.Builder(this).setTitle("Recording ${r.id}")
+            .setItems(arrayOf("Play", "Delete")) { _, which ->
+                if (which == 0) startPlayback(r, 0)
+                else AlertDialog.Builder(this).setMessage("Delete recording ${r.id}? The sound is removed; your writing stays.")
+                    .setPositiveButton("Delete") { _, _ -> AudioNotes.delete(this, note, r); stopPlaybackUi(); save() }
+                    .setNegativeButton("Keep", null).show()
+            }.setNegativeButton("Back", null).show()
+    }
+
+    private fun buildPlayBar(): LinearLayout {
+        val bar = row().apply { setBackgroundColor(Color.WHITE) }
+        playPauseBtn = tb("Pause") { if (AudioNotes.isPlaying) AudioNotes.pause() else AudioNotes.resume(); updatePlayUi() }
+        playPosBtn = tb("0:00") { }
+        replayBtn = tb("Replay: off") { replayOn = !replayOn; updatePlayUi(); AudioNotes.playing?.let { ink.setReplay(if (replayOn) it.id else 0, AudioNotes.positionMs()) } }
+        for (b in listOf(playPauseBtn, tb("-10 s") { AudioNotes.seekTo(AudioNotes.positionMs() - 10000); updatePlayUi() },
+            tb("+10 s") { AudioNotes.seekTo(AudioNotes.positionMs() + 10000); updatePlayUi() }, playPosBtn, replayBtn,
+            tb("Stop") { stopPlaybackUi() })) bar.addView(b, weight())
+        return bar
+    }
+
+    private fun updatePlayUi() {
+        if (!::playBar.isInitialized) return
+        playPauseBtn.text = if (AudioNotes.isPlaying) "Pause" else "Play"
+        playPosBtn.text = AudioNotes.clock(AudioNotes.positionMs()) + " / " + AudioNotes.clock(AudioNotes.durationMs())
+        replayBtn.text = "Replay: " + (if (replayOn) "on" else "off")
+    }
+
+    private fun startPlayback(r: Recording, from: Int) {
+        if (AudioNotes.active != null) { Toast.makeText(this, "Stop recording first", Toast.LENGTH_SHORT).show(); return }
+        if (!AudioNotes.play(this, r, from) { stopPlaybackUi() }) {
+            Toast.makeText(this, "Could not play that recording", Toast.LENGTH_LONG).show(); return
+        }
+        optionsBar.visibility = View.GONE
+        playBar.visibility = View.VISIBLE
+        ink.onSeekItem = { item -> if (item.recId == r.id) { AudioNotes.seekTo(item.recMs); updatePlayUi() } }
+        updatePlayUi()
+        ink.setReplay(if (replayOn) r.id else 0, from)
+        ui.removeCallbacks(playTick); ui.postDelayed(playTick, 2000)
+    }
+
+    private fun stopPlaybackUi() {
+        AudioNotes.stopPlayback()
+        ui.removeCallbacks(playTick)
+        if (::playBar.isInitialized) playBar.visibility = View.GONE
+        ink.onSeekItem = null
+        ink.setReplay(0, 0)
     }
 
     // ---- images ------------------------------------------------------------------------------
@@ -541,6 +679,7 @@ class NotesActivity : Activity(), InkView.Host {
             tb("Import PDF into this notebook...") { pickPdf() },
             tb("Delete this page") { confirmDeletePage() },
             tb("Insert image...") { pickImage() },
+            tb("Audio recordings...") { showRecordings() },
             tb("Export notebook as PDF") { exportPdf() },
             tb("Full screen refresh now") { eink.fullRefresh(); hideSettings() },
             tb("Open device test tools (Probe)") { save(); startActivity(Intent(this, ProbeActivity::class.java)) },
@@ -632,7 +771,7 @@ class NotesActivity : Activity(), InkView.Host {
 
     // ---- keys --------------------------------------------------------------------------------
 
-    private val toolCycle = listOf(Tool.PEN, Tool.HIGHLIGHTER, Tool.ERASER, Tool.SELECT, Tool.SHAPE, Tool.TEXT, Tool.HAND)
+    private val toolCycle = listOf(Tool.PEN, Tool.HIGHLIGHTER, Tool.ERASER, Tool.SELECT, Tool.SHAPE, Tool.TEXT, Tool.TAPE, Tool.HAND)
 
     override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
         val code = ev.keyCode
@@ -714,6 +853,9 @@ class NotesActivity : Activity(), InkView.Host {
     }
 
     override fun onDestroy() {
+        if (AudioNotes.active != null) stopRecording()
+        if (AudioNotes.playing != null) AudioNotes.stopPlayback()
+        ui.removeCallbacks(playTick); ui.removeCallbacks(recTick)
         eink.restoreNow()
         super.onDestroy()
     }
@@ -734,6 +876,17 @@ class NotesActivity : Activity(), InkView.Host {
                     "tool_calli" -> { selectTool(Tool.PEN); ink.tool = Tool.CALLIGRAPHY }
                     "tool_shape" -> selectTool(Tool.SHAPE)
                     "tool_text" -> selectTool(Tool.TEXT)
+                    "tool_tape" -> selectTool(Tool.TAPE)
+                    "ruler" -> ink.rulerOn = i.getBooleanExtra("v", true)
+                    "smooth" -> { ink.settings.smoothing = i.getIntExtra("v", 1); saveToolSettings() }
+                    "rec_start" -> if (AudioNotes.active == null) onRecTapped()
+                    "rec_stop" -> if (AudioNotes.active != null) stopRecording()
+                    "play" -> note.recordings.firstOrNull { it.id == i.getIntExtra("id", 1) }?.let { startPlayback(it, i.getIntExtra("from", 0)) }
+                    "play_stop" -> stopPlaybackUi()
+                    "replay" -> { replayOn = i.getBooleanExtra("v", true); updatePlayUi() }
+                    "seek" -> { AudioNotes.seekTo(i.getIntExtra("ms", 0)); updatePlayUi() }
+                    "audio_state" -> Log.d("InkDebug", "audio recs=" + note.recordings.joinToString { "#${it.id}:${it.durationMs}ms ${AudioNotes.fileOf(this@NotesActivity, it).length()}B" } +
+                        " active=${AudioNotes.active?.id} playing=${AudioNotes.playing?.id} pos=${AudioNotes.positionMs()} isPlaying=${AudioNotes.isPlaying}")
                     "text" -> ink.addText(i.getStringExtra("t") ?: "Hello", i.getFloatExtra("x", 200f), i.getFloatExtra("y", 400f))
                     "image_path" -> i.getStringExtra("path")?.let { importImage(Uri.fromFile(File(it))) }
                     "eraser_partial" -> { ink.settings.eraserPartial = i.getBooleanExtra("v", true); ink.settings.eraserRadius = i.getFloatExtra("r", 18f) }

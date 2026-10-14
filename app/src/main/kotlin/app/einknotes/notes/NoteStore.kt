@@ -21,16 +21,19 @@ import java.io.FileOutputStream
  *      type 2 shape:  kind byte | closed byte | gray int | widthScale float | n int | n floats
  *      type 3 text:   text utf | x,y,boxW,size floats | gray int | bold byte
  *      type 4 image:  file utf | l,t,r,b floats | srcW int | srcH int
+ *      type 5 tape:   l,t,r,b floats | covered byte
+ *   v5: every item is followed by recId int | recMs int; after the last page: recordingCount int, per recording id int | file utf | startedAt long | durationMs int
  *   (v1/v2 items are strokes without a type byte; v1 pages have no size or pdf fields)
  */
 object NoteStore {
     private const val MAGIC = 0x494E4B4E   // "INKN"
-    private const val VERSION = 4
+    private const val VERSION = 5
 
     const val ITEM_STROKE = 1
     const val ITEM_SHAPE = 2
     const val ITEM_TEXT = 3
     const val ITEM_IMAGE = 4
+    const val ITEM_TAPE = 5
 
     class Header(val title: String, val created: Long, val modified: Long, val pageCount: Int)
 
@@ -50,8 +53,10 @@ object NoteStore {
                 if (pdf != null) { out.writeUTF(pdf); out.writeInt(page.pdfPage) }
                 out.writeByte(if (page.bookmarked) 1 else 0)
                 out.writeInt(page.items.size)
-                for (item in page.items) writeItem(out, item)
+                for (item in page.items) { writeItem(out, item); out.writeInt(item.recId); out.writeInt(item.recMs) }
             }
+            out.writeInt(note.recordings.size)
+            for (r in note.recordings) { out.writeInt(r.id); out.writeUTF(r.file); out.writeLong(r.startedAt); out.writeInt(r.durationMs) }
         }
         if (file.exists()) file.delete()
         if (!tmp.renameTo(file)) throw java.io.IOException("could not move ${tmp.name} into place")
@@ -78,6 +83,11 @@ object NoteStore {
                 out.writeUTF(item.text)
                 out.writeFloat(item.x); out.writeFloat(item.y); out.writeFloat(item.boxW); out.writeFloat(item.size)
                 out.writeInt(item.gray); out.writeByte(if (item.bold) 1 else 0)
+            }
+            is TapeItem -> {
+                out.writeByte(ITEM_TAPE)
+                out.writeFloat(item.l); out.writeFloat(item.t); out.writeFloat(item.r); out.writeFloat(item.b)
+                out.writeByte(if (item.covered) 1 else 0)
             }
             is ImageItem -> {
                 out.writeByte(ITEM_IMAGE)
@@ -120,7 +130,7 @@ object NoteStore {
             DataInputStream(BufferedInputStream(FileInputStream(file), 1 shl 16)).use { inp ->
                 require(inp.readInt() == MAGIC) { "not a notebook file" }
                 val version = inp.readInt()
-                require(version in 1..4) { "unknown notebook version" }
+                require(version in 1..5) { "unknown notebook version" }
                 val note = if (version >= 3) {
                     val title = inp.readUTF(); val created = inp.readLong(); val modified = inp.readLong()
                     NoteData(title, created).also { it.modified = modified }
@@ -136,9 +146,14 @@ object NoteStore {
                     }
                     if (version >= 4) page.bookmarked = (inp.readByte().toInt() and 1) != 0
                     val count = inp.readInt()
-                    repeat(count) { readItem(inp, version)?.let { page.items.add(it) } }
+                    repeat(count) {
+                        val item = readItem(inp, version)
+                        if (version >= 5) { val id = inp.readInt(); val ms = inp.readInt(); item?.recId = id; item?.recMs = ms }
+                        item?.let { page.items.add(it) }
+                    }
                     note.pages.add(page)
                 }
+                if (version >= 5) repeat(inp.readInt()) { note.recordings.add(Recording(inp.readInt(), inp.readUTF(), inp.readLong(), inp.readInt())) }
                 if (note.pages.isEmpty()) note.pages.add(PageData())
                 note
             }
@@ -182,6 +197,10 @@ object NoteStore {
                 val x = inp.readFloat(); val y = inp.readFloat(); val w = inp.readFloat(); val size = inp.readFloat()
                 val gray = inp.readInt(); val bold = inp.readByte().toInt() == 1
                 TextItem(text, x, y, w, size, gray, bold)
+            }
+            ITEM_TAPE -> {
+                val l = inp.readFloat(); val t = inp.readFloat(); val r = inp.readFloat(); val b = inp.readFloat()
+                TapeItem(l, t, r, b, inp.readByte().toInt() == 1)
             }
             ITEM_IMAGE -> {
                 val file = inp.readUTF()

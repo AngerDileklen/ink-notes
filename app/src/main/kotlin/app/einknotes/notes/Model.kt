@@ -15,7 +15,7 @@ const val PAGE_W = 1404f
 const val PAGE_H = 1872f
 
 /** What the pen does when it touches the page. */
-enum class Tool { PEN, HIGHLIGHTER, CALLIGRAPHY, ERASER, SELECT, SHAPE, HAND, TEXT }
+enum class Tool { PEN, HIGHLIGHTER, CALLIGRAPHY, ERASER, SELECT, SHAPE, HAND, TEXT, TAPE }
 
 /** How a stroke looks. */
 enum class Brush { PEN, HIGHLIGHTER, CALLIGRAPHY }
@@ -41,6 +41,10 @@ const val HIGHLIGHTER_WIDTH = 30f
 
 abstract class Item {
     var minX = 0f; var minY = 0f; var maxX = 0f; var maxY = 0f
+
+    /** The audio recording that was running when this was written (0 = none) and how many ms into it. */
+    var recId = 0
+    var recMs = 0
 
     abstract fun recomputeBounds()
     /** True if (x,y) is within r of the item's ink. Used by the eraser and by tap-to-select. */
@@ -150,6 +154,7 @@ class Stroke(
         return runs.map { run ->
             val k = run.size / 3
             Stroke(brush, gray, widthScale, FloatArray(k) { run[it * 3] }, FloatArray(k) { run[it * 3 + 1] }, FloatArray(k) { run[it * 3 + 2] }, nibAngle, nibFlat)
+                .also { it.recId = recId; it.recMs = recMs }
         }
     }
 
@@ -356,6 +361,35 @@ class ImageItem(val file: String, var l: Float, var t: Float, var r: Float, var 
 }
 
 // ---------------------------------------------------------------------------------------------
+// Tape: a patch that hides what is under it (for studying). Tap it with the Tape tool to lift or put it back.
+// ---------------------------------------------------------------------------------------------
+
+class TapeItem(var l: Float, var t: Float, var r: Float, var b: Float, var covered: Boolean = true) : Item() {
+    init { recomputeBounds() }
+
+    override fun recomputeBounds() { minX = min(l, r); maxX = max(l, r); minY = min(t, b); maxY = max(t, b) }
+
+    override fun hit(x: Float, y: Float, r: Float) = x >= minX - r && x <= maxX + r && y >= minY - r && y <= maxY + r
+
+    override fun transform(m: Matrix) {
+        val p = floatArrayOf(l, t, r, b)
+        m.mapPoints(p)
+        l = p[0]; t = p[1]; r = p[2]; b = p[3]
+        recomputeBounds()
+    }
+
+    override fun copy(): Item = TapeItem(l, t, r, b, covered)
+
+    override fun fractionInside(poly: FloatArray): Float {
+        val cx = (minX + maxX) / 2f; val cy = (minY + maxY) / 2f
+        val pts = floatArrayOf(minX, minY, maxX, minY, maxX, maxY, minX, maxY, cx, cy)
+        var inside = 0
+        for (i in 0 until 5) if (pointInPolygon(pts[i * 2], pts[i * 2 + 1], poly)) inside++
+        return inside / 5f
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Pages and notebooks
 // ---------------------------------------------------------------------------------------------
 
@@ -376,8 +410,12 @@ class PageData(var paper: Paper = Paper.RULED) {
     var bookmarked = false
 }
 
+/** One audio recording of a notebook. [file] is a name inside the app's audio folder. */
+class Recording(val id: Int, val file: String, val startedAt: Long, var durationMs: Int)
+
 class NoteData(var title: String = "Notebook", var created: Long = System.currentTimeMillis()) {
     val pages = ArrayList<PageData>()
+    val recordings = ArrayList<Recording>()
     var modified: Long = created
 
     init { pages.add(PageData()) }

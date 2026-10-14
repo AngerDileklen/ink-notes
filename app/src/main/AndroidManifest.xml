@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <!-- Lets the probe list installed packages (vendor e-ink services, the maker's own notes app). -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <!-- Audio notes: record a lecture while writing. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
     <application
         android:allowBackup="false"
@@ -45,6 +48,12 @@
             android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"
             android:exported="true"
             android:label="Ink Notes" />
+
+        <!-- Keeps the app alive while a recording runs with the screen off. -->
+        <service
+            android:name=".notes.RecordingService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <!-- Device test tools, opened from Ink Notes > More. -->
         <activity
