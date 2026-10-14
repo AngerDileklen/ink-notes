@@ -48,7 +48,7 @@ Status: DONE / NEXT / LATER / SKIP (with reason)
 ## Recognition and audio
 | Feature | Plan | Status |
 |---|---|---|
-| Handwriting search | Needs a recogniser: investigate Hanvon's built-in MyScript service on the device | LATER |
+| Handwriting search | Hanvon's MyScript service is NOT usable (no binder; reads strokes from hvNote's own content provider; licence bound to their app). Needs an open on-device model bundled with the app (e.g. ONNX Runtime + a recogniser) | LATER (research) |
 | Handwriting to text | Same | LATER |
 | Math recognition | Same | SKIP for now |
 | OCR of images and scans | Not now | SKIP |
