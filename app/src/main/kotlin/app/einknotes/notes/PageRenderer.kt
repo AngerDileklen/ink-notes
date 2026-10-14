@@ -86,6 +86,7 @@ class PageRenderer {
     fun drawItem(c: Canvas, item: Item, scale: Float, tx: Float, ty: Float) {
         when (item) {
             is Stroke -> drawStroke(c, item, scale, tx, ty)
+            is ShapeItem -> drawShape(c, item, scale, tx, ty)
         }
     }
 
@@ -97,6 +98,30 @@ class PageRenderer {
         val p = newPainter(c, s.brush, s.gray, s.widthScale, s.nibAngle, s.nibFlat, scale)
         for (i in 0 until s.n) p.add(tx + s.xs[i] * scale, ty + s.ys[i] * scale, s.ps[i])
         p.finish()
+    }
+
+    private fun drawShape(c: Canvas, s: ShapeItem, scale: Float, tx: Float, ty: Float) {
+        inkPaint.color = Color.rgb(s.gray, s.gray, s.gray)
+        inkPaint.strokeWidth = max(SHAPE_WIDTH * s.widthScale * scale, 1.2f)
+        val o = s.outline()
+        val path = Path()
+        for (i in 0 until o.size / 2) {
+            val x = tx + o[i * 2] * scale; val y = ty + o[i * 2 + 1] * scale
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        if (s.closed && s.kind != ShapeKind.ELLIPSE) path.close()
+        c.drawPath(path, inkPaint)
+        if (s.kind == ShapeKind.ARROW) {
+            // two short strokes sweeping back from the head
+            val x0 = s.pts[0]; val y0 = s.pts[1]; val x1 = s.pts[2]; val y1 = s.pts[3]
+            val ang = atan2(y1 - y0, x1 - x0)
+            val len = min(max(10f * s.widthScale * 3f, 24f), 46f)
+            for (side in intArrayOf(-1, 1)) {
+                val a = ang + Math.PI.toFloat() + side * 0.5f
+                c.drawLine(tx + x1 * scale, ty + y1 * scale,
+                    tx + (x1 + kotlin.math.cos(a) * len) * scale, ty + (y1 + sin(a) * len) * scale, inkPaint)
+            }
+        }
     }
 
     // ---- highlighter -------------------------------------------------------------------------

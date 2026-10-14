@@ -30,7 +30,14 @@ class ToolSettings {
     var calGray = 0
     var calAngle = (Math.PI / 2).toFloat()
     var calFlat = 0.75f
+    /** Hold the pen still at the end of a stroke and it becomes a clean shape. */
+    var shapeSnap = true
+    var snapHoldMs = 600L
+    /** Which shape the Shape tool draws. */
+    var shapeTool = UserShape.RECT
 }
+
+enum class UserShape(val label: String) { LINE("Line"), ARROW("Arrow"), RECT("Rectangle"), ELLIPSE("Ellipse"), TRIANGLE("Triangle") }
 
 /**
  * One notebook page on screen. Everything committed (paper, PDF, items) lives in a single bitmap that is
@@ -100,6 +107,24 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private var lastPressure = 0f
     private var lastVx = 0f
     private var lastVy = 0f
+
+    // hold-to-snap
+    private var lastMoveTime = 0L
+    private var snapTried = false
+    private var snappedShape: ShapeItem? = null
+    private val holdCheck = object : Runnable {
+        override fun run() {
+            if (!writing) return
+            checkHold()
+            postDelayed(this, 120)
+        }
+    }
+
+    // the Shape tool: drag out a shape
+    private var shapeStartX = 0f
+    private var shapeStartY = 0f
+    private var previewShape: ShapeItem? = null
+    private var previewRect: Rect? = null
 
     // the erase gesture being performed right now
     private var erasing = false
@@ -177,6 +202,18 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         clearSelection()
         note.pages.addAll(pageIndex + 1, list)
         pageIndex += 1
+        fitToView(keepZoom = false)
+        transformChanged()
+        rebuild()
+        host.onDocumentChanged()
+    }
+
+    /** Inserts [list] at [index] and shows the first of them. */
+    fun insertPagesAt(index: Int, list: List<PageData>) {
+        if (list.isEmpty()) return
+        clearSelection()
+        note.pages.addAll(index.coerceIn(0, note.pages.size), list)
+        pageIndex = index.coerceIn(0, note.pages.size - 1)
         fitToView(keepZoom = false)
         transformChanged()
         rebuild()
@@ -360,6 +397,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             }
         }
         if (selMode == SelMode.LASSO) canvas.drawPath(lasso, selDash)
+        previewShape?.let { renderer.drawItem(canvas, it, scale, tx, ty) }
     }
 
     /** Redraws paper, PDF and every item into the bitmap, then repaints the whole view. */
@@ -439,7 +477,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                     Tool.ERASER -> { clearSelection(); erasing = true; erased.clear(); eraseLastX = e.x; eraseLastY = e.y; eraseAt(e.x, e.y) }
                     Tool.HAND -> { panning = true; panLastX = e.x; panLastY = e.y }
                     Tool.SELECT -> beginSelectGesture(e.x, e.y)
-                    Tool.SHAPE -> { clearSelection(); beginStroke(Tool.PEN, e.x, e.y, e.pressure) }
+                    Tool.SHAPE -> { clearSelection(); shapeStartX = e.x; shapeStartY = e.y; previewShape = null; previewRect = null; shapeDragging = true }
                 }
             }
             MotionEvent.ACTION_MOVE -> {
@@ -450,13 +488,14 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                 when {
                     writing -> {
                         // The lift-off position is part of the stroke: without it every line ends a little short.
-                        if (e.actionMasked == MotionEvent.ACTION_UP) {
+                        if (e.actionMasked == MotionEvent.ACTION_UP && snappedShape == null) {
                             for (i in 0 until e.historySize) move(e.getHistoricalX(i), e.getHistoricalY(i), e.getHistoricalPressure(i))
                             finalPoint(e.x, e.y)
                         }
                         endStroke()
                     }
                     erasing -> endErase()
+                    shapeDragging -> endShapeDrag()
                     panning -> { panning = false; transformChanged(); rebuild() }
                     selMode != SelMode.NONE -> endSelectGesture(e.x, e.y)
                 }
@@ -466,9 +505,17 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         return true
     }
 
+    private var shapeDragging = false
+
     private fun move(x: Float, y: Float, rawPressure: Float) {
         when {
-            writing -> addStrokePoint(x, y, rawPressure)
+            writing -> {
+                if (snappedShape != null) {
+                    // A snap is only a proposal: if the pen moves away again, the person was not finished.
+                    if (hypot(x - lastVx, y - lastVy) > 25f) cancelSnap(x, y, rawPressure)
+                } else addStrokePoint(x, y, rawPressure)
+            }
+            tool == Tool.SHAPE && !erasing && !panning && selMode == SelMode.NONE && shapeDragging -> dragShape(x, y)
             erasing -> eraseAlong(x, y)
             panning -> {
                 tx += x - panLastX; ty += y - panLastY
@@ -488,6 +535,8 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         brush = when (active) { Tool.HIGHLIGHTER -> Brush.HIGHLIGHTER; Tool.CALLIGRAPHY -> Brush.CALLIGRAPHY; else -> Brush.PEN }
         liveXs.clear(); liveYs.clear(); livePs.clear()
         writing = true
+        snappedShape = null; snapTried = false; lastMoveTime = SystemClock.uptimeMillis()
+        removeCallbacks(holdCheck); postDelayed(holdCheck, 120)
         lastPressure = normalisePressure(rawPressure)
         if (brush == Brush.HIGHLIGHTER) {
             // Highlighter is redrawn as one path each time; keep a clean copy to restore underneath it.
@@ -508,6 +557,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         val dx = x - lastVx; val dy = y - lastVy
         if (dx * dx + dy * dy < 1f) return
         lastVx = x; lastVy = y
+        lastMoveTime = SystemClock.uptimeMillis(); snapTried = false
         lastPressure = 0.6f * lastPressure + 0.4f * normalisePressure(rawPressure)   // gentle pressure smoothing
         pushPoint(x, y, lastPressure)
         flushLive()
@@ -553,11 +603,19 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     }
 
     private fun endStroke() {
-        painter?.finish()
-        flushLive()
+        removeCallbacks(holdCheck)
+        val snapped = snappedShape
+        if (snapped == null) { painter?.finish(); flushLive() }   // a replaced stroke must not draw any more ink
         painter = null
         writing = false
         hlBase?.recycle(); hlBase = null
+        if (snapped != null) {
+            snappedShape = null
+            page.items.add(snapped)
+            push(Cmd.Add(page, listOf(snapped)))
+            host.onDocumentChanged()
+            return
+        }
         if (liveXs.size >= 1) {
             val s = Stroke(brush, grayFor(brush), widthFor(brush), liveXs.toArray(), liveYs.toArray(), livePs.toArray(),
                 settings.calAngle, settings.calFlat)
@@ -565,6 +623,79 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             push(Cmd.Add(page, listOf(s)))
             host.onDocumentChanged()
         }
+    }
+
+    // ---- shapes ------------------------------------------------------------------------------
+
+    /** The pen has been still long enough: if the stroke looks like a shape, replace it with the clean one. */
+    private fun checkHold() {
+        if (!settings.shapeSnap || snappedShape != null || snapTried) return
+        if (brush == Brush.HIGHLIGHTER) return
+        if (SystemClock.uptimeMillis() - lastMoveTime < settings.snapHoldMs) return
+        snapTried = true
+        if (liveXs.size < 6) return
+        val d = ShapeDetector.detect(liveXs.toArray(), liveYs.toArray(), scale) ?: return
+        val shape = ShapeItem(d.kind, d.pts, d.closed, grayFor(brush), widthFor(brush))
+        snappedShape = shape
+        if (debuggable) Log.d("InkView", "snapped to ${d.label} (confidence ${"%.2f".format(d.confidence)})")
+        // redraw the page without the rough stroke, then show the clean shape in its place
+        rebuild()
+        bmpCanvas?.let { renderer.drawItem(it, shape, scale, tx, ty) }
+        invalidate()
+    }
+
+    /** Takes the clean shape back and carries on drawing the freehand stroke from where it was. */
+    private fun cancelSnap(x: Float, y: Float, rawPressure: Float) {
+        snappedShape = null
+        val c = bmpCanvas ?: return
+        rebuild()
+        val p = renderer.newPainter(c, brush, grayFor(brush), widthFor(brush), settings.calAngle, settings.calFlat, scale)
+        for (i in 0 until liveXs.size) p.add(tx + liveXs[i] * scale, ty + liveYs[i] * scale, livePs[i])
+        painter = p
+        flushLive()
+        addStrokePoint(x, y, rawPressure)
+    }
+
+    private fun shapeFor(kind: UserShape, x0: Float, y0: Float, x1: Float, y1: Float): ShapeItem? {
+        // convert from view pixels to page units
+        val ax = (x0 - tx) / scale; val ay = (y0 - ty) / scale; val bx = (x1 - tx) / scale; val by = (y1 - ty) / scale
+        val l = min(ax, bx); val r = max(ax, bx); val t = min(ay, by); val b = max(ay, by)
+        val g = settings.penGray; val w = settings.penWidth
+        return when (kind) {
+            UserShape.LINE -> ShapeItem(ShapeKind.LINE, floatArrayOf(ax, ay, bx, by), false, g, w)
+            UserShape.ARROW -> ShapeItem(ShapeKind.ARROW, floatArrayOf(ax, ay, bx, by), false, g, w)
+            UserShape.RECT -> ShapeItem(ShapeKind.POLYGON, floatArrayOf(l, t, r, t, r, b, l, b), true, g, w)
+            UserShape.TRIANGLE -> ShapeItem(ShapeKind.POLYGON, floatArrayOf((l + r) / 2f, t, r, b, l, b), true, g, w)
+            UserShape.ELLIPSE -> {
+                val cx = (l + r) / 2f; val cy = (t + b) / 2f
+                ShapeItem(ShapeKind.ELLIPSE, floatArrayOf(cx, cy, r, cy, cx, b), true, g, w)
+            }
+        }
+    }
+
+    private fun dragShape(x: Float, y: Float) {
+        val s = shapeFor(settings.shapeTool, shapeStartX, shapeStartY, x, y) ?: return
+        val old = previewRect
+        previewShape = s
+        val region = Rect(
+            (tx + s.minX * scale).toInt() - 12, (ty + s.minY * scale).toInt() - 12,
+            (tx + s.maxX * scale).toInt() + 12, (ty + s.maxY * scale).toInt() + 12)
+        previewRect = region
+        invalidate(old?.let { Rect(it).apply { union(region) } } ?: region)
+    }
+
+    private fun endShapeDrag() {
+        shapeDragging = false
+        val s = previewShape
+        previewShape = null
+        val region = previewRect; previewRect = null
+        if (s != null && (s.maxX - s.minX) * scale > 14f || s != null && (s.maxY - s.minY) * scale > 14f) {
+            page.items.add(s)
+            push(Cmd.Add(page, listOf(s)))
+            host.onDocumentChanged()
+            if (region != null) polish = polish?.also { it.union(region) } ?: Rect(region)
+        }
+        rebuild()
     }
 
     // ---- erasing -----------------------------------------------------------------------------

@@ -12,8 +12,8 @@ android {
         minSdk = 28
         // The tablet runs Android 11. Targeting 29 keeps simple file access for the probe's report.
         targetSdk = 29
-        versionCode = 8
-        versionName = "0.3.0-tools"
+        versionCode = 9
+        versionName = "0.4.0-shapes"
     }
 
     buildTypes {
@@ -29,4 +29,8 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
 }

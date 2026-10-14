@@ -18,6 +18,7 @@ import java.io.FileOutputStream
  *   per page:   paper int | width float | height float | hasPdf byte [pdfName utf | pdfPage int] | itemCount int
  *   per item (v3): type byte, then the item's data
  *      type 1 stroke: brush byte | gray int | widthScale float | nibAngle float | nibFlat float | n int | n*(x,y,pressure)
+ *      type 2 shape:  kind byte | closed byte | gray int | widthScale float | n int | n floats
  *   (v1/v2 items are strokes without a type byte; v1 pages have no size or pdf fields)
  */
 object NoteStore {
@@ -25,6 +26,7 @@ object NoteStore {
     private const val VERSION = 3
 
     const val ITEM_STROKE = 1
+    const val ITEM_SHAPE = 2
 
     class Header(val title: String, val created: Long, val modified: Long, val pageCount: Int)
 
@@ -58,6 +60,13 @@ object NoteStore {
                 out.writeFloat(item.nibAngle); out.writeFloat(item.nibFlat)
                 out.writeInt(item.n)
                 for (i in 0 until item.n) { out.writeFloat(item.xs[i]); out.writeFloat(item.ys[i]); out.writeFloat(item.ps[i]) }
+            }
+            is ShapeItem -> {
+                out.writeByte(ITEM_SHAPE)
+                out.writeByte(item.kind.ordinal); out.writeByte(if (item.closed) 1 else 0)
+                out.writeInt(item.gray); out.writeFloat(item.widthScale)
+                out.writeInt(item.pts.size)
+                for (v in item.pts) out.writeFloat(v)
             }
             else -> throw IllegalStateException("unknown item type ${item.javaClass.simpleName}")
         }
@@ -134,6 +143,14 @@ object NoteStore {
                     for (i in 0 until n) { xs[i] = inp.readFloat(); ys[i] = inp.readFloat(); ps[i] = inp.readFloat() }
                     Stroke(Brush.PEN, 0, 1f, xs, ys, ps)
                 }
+            }
+            ITEM_SHAPE -> {
+                val kind = ShapeKind.values().getOrElse(inp.readByte().toInt()) { ShapeKind.LINE }
+                val closed = inp.readByte().toInt() == 1
+                val gray = inp.readInt(); val ws = inp.readFloat()
+                val n = inp.readInt()
+                val pts = FloatArray(n) { inp.readFloat() }
+                ShapeItem(kind, pts, closed, gray, ws)
             }
             else -> throw java.io.IOException("unknown item type $type")
         }

@@ -127,6 +127,92 @@ fun pointInPolygon(x: Float, y: Float, poly: FloatArray): Boolean {
     return inside
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// Shapes: lines, arrows, ellipses and polygons (rectangles and triangles are polygons).
+// ---------------------------------------------------------------------------------------------
+
+enum class ShapeKind { LINE, ARROW, ELLIPSE, POLYGON }
+
+/** Base line width of a shape in page units at widthScale 1. */
+const val SHAPE_WIDTH = 3.2f
+
+/**
+ * [pts] holds x,y pairs in page units.
+ *  LINE / ARROW: tail, head.   ELLIPSE: centre, end of one semi-axis, end of the other (so any affine
+ *  transform, including rotation and stretching, keeps it an ellipse).   POLYGON: the vertices.
+ */
+class ShapeItem(
+    val kind: ShapeKind,
+    var pts: FloatArray,
+    val closed: Boolean,
+    var gray: Int = 0,
+    var widthScale: Float = 1f
+) : Item() {
+
+    init { recomputeBounds() }
+
+    /** The shape's outline as a polyline (x,y pairs); closed shapes repeat their first point at the end. */
+    fun outline(): FloatArray = when (kind) {
+        ShapeKind.LINE, ShapeKind.ARROW -> pts.copyOf(4)
+        ShapeKind.POLYGON -> if (closed) pts + floatArrayOf(pts[0], pts[1]) else pts.copyOf()
+        ShapeKind.ELLIPSE -> {
+            val cx = pts[0]; val cy = pts[1]
+            val ax = pts[2] - cx; val ay = pts[3] - cy; val bx = pts[4] - cx; val by = pts[5] - cy
+            val n = 72
+            val out = FloatArray((n + 1) * 2)
+            for (i in 0..n) {
+                val t = 2.0 * Math.PI * i / n
+                val c = Math.cos(t).toFloat(); val sn = Math.sin(t).toFloat()
+                out[i * 2] = cx + c * ax + sn * bx
+                out[i * 2 + 1] = cy + c * ay + sn * by
+            }
+            out
+        }
+    }
+
+    override fun recomputeBounds() {
+        val o = outline()
+        var a = Float.MAX_VALUE; var b = Float.MAX_VALUE; var c = -Float.MAX_VALUE; var d = -Float.MAX_VALUE
+        for (i in o.indices step 2) { a = min(a, o[i]); c = max(c, o[i]); b = min(b, o[i + 1]); d = max(d, o[i + 1]) }
+        val pad = SHAPE_WIDTH * widthScale / 2f + 1f + if (kind == ShapeKind.ARROW) 14f else 0f
+        minX = a - pad; minY = b - pad; maxX = c + pad; maxY = d + pad
+    }
+
+    override fun hit(x: Float, y: Float, r: Float): Boolean {
+        val o = outline()
+        for (i in 0 until o.size / 2 - 1) {
+            if (segDist(x, y, o[i * 2], o[i * 2 + 1], o[i * 2 + 2], o[i * 2 + 3]) <= r + SHAPE_WIDTH * widthScale / 2f) return true
+        }
+        return false
+    }
+
+    override fun transform(m: Matrix) {
+        m.mapPoints(pts)
+        widthScale *= m.mapRadius(1f)
+        recomputeBounds()
+    }
+
+    override fun copy(): Item = ShapeItem(kind, pts.copyOf(), closed, gray, widthScale)
+
+    override fun fractionInside(poly: FloatArray): Float {
+        val o = outline()
+        val n = o.size / 2
+        var inside = 0
+        for (i in 0 until n) if (pointInPolygon(o[i * 2], o[i * 2 + 1], poly)) inside++
+        return inside / n.toFloat()
+    }
+
+    private fun segDist(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
+        val dx = bx - ax; val dy = by - ay
+        val len2 = dx * dx + dy * dy
+        if (len2 == 0f) return sqrt((px - ax) * (px - ax) + (py - ay) * (py - ay))
+        val t = (((px - ax) * dx + (py - ay) * dy) / len2).coerceIn(0f, 1f)
+        val qx = ax + t * dx; val qy = ay + t * dy
+        return sqrt((px - qx) * (px - qx) + (py - qy) * (py - qy))
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Pages and notebooks
 // ---------------------------------------------------------------------------------------------

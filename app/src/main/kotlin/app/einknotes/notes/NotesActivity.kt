@@ -50,7 +50,9 @@ class NotesActivity : Activity(), InkView.Host {
     private lateinit var importText: TextView
     private var importing = false
     private lateinit var eink: EinkController
-    private val file by lazy { File(filesDir, "notes/notebook1.inkn") }
+    private lateinit var file: File
+    private lateinit var notebookName: String
+    private val debuggableApp get() = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
     private val prefs get() = getSharedPreferences("notes", Context.MODE_PRIVATE)
 
     // toolbar
@@ -63,6 +65,7 @@ class NotesActivity : Activity(), InkView.Host {
     private lateinit var polishBtn: Button
     private lateinit var paperBtn: Button
     private lateinit var sideBtn: Button
+    private lateinit var snapBtn: Button
     private lateinit var devStatus: TextView
 
     // floating bars over the page
@@ -112,6 +115,11 @@ class NotesActivity : Activity(), InkView.Host {
         presetIndex = prefs.getInt("preset", 1).coerceIn(0, presets.size - 1)
         polish = prefs.getBoolean("polish", false)
 
+        // Debug builds can open a separate scratch notebook (adb ... --es notebook scratch) so tests never touch real notes.
+        notebookName = (if (debuggableApp) intent?.getStringExtra("notebook") else null)?.filter { it.isLetterOrDigit() || it == '_' }
+            ?.ifEmpty { null } ?: "notebook1"
+        file = File(filesDir, "notes/$notebookName.inkn")
+        rotateBackups()
         note = NoteStore.load(file)
         pdfs = PdfLibrary(this)
         ink = InkView(this, note, pdfs, this)
@@ -120,8 +128,8 @@ class NotesActivity : Activity(), InkView.Host {
 
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
         val row1 = row()
-        for ((tool, label) in listOf(Tool.PEN to "Pen", Tool.HIGHLIGHTER to "Marker", Tool.CALLIGRAPHY to "Calli",
-            Tool.ERASER to "Erase", Tool.SELECT to "Select", Tool.HAND to "Hand")) {
+        for ((tool, label) in listOf(Tool.PEN to "Pen", Tool.HIGHLIGHTER to "Marker",
+            Tool.ERASER to "Erase", Tool.SELECT to "Select", Tool.SHAPE to "Shape", Tool.HAND to "Hand")) {
             val b = tb(label) { onToolTapped(tool) }
             toolButtons[tool] = b
             row1.addView(b, weight())
@@ -162,6 +170,8 @@ class NotesActivity : Activity(), InkView.Host {
         setContentView(frame)
 
         selectTool(Tool.PEN)
+        // come back to the page you were writing on
+        ink.goToPage(prefs.getInt("lastPage_$notebookName", 0).coerceIn(0, note.pages.size - 1))
         refreshChrome()
         registerDebugControl()
         handleIncoming(intent)
@@ -206,7 +216,8 @@ class NotesActivity : Activity(), InkView.Host {
 
     /** Tapping the active tool again opens its options; tapping another tool switches to it. */
     private fun onToolTapped(t: Tool) {
-        if (ink.tool == t && (t == Tool.PEN || t == Tool.HIGHLIGHTER || t == Tool.CALLIGRAPHY)) {
+        val current = if (ink.tool == Tool.CALLIGRAPHY) Tool.PEN else ink.tool
+        if (current == t && (t == Tool.PEN || t == Tool.HIGHLIGHTER || t == Tool.SHAPE)) {
             if (optionsBar.visibility == View.VISIBLE) optionsBar.visibility = View.GONE else showOptions(t)
         } else selectTool(t)
     }
@@ -214,7 +225,7 @@ class NotesActivity : Activity(), InkView.Host {
     private fun selectTool(t: Tool) {
         if (t != Tool.SELECT) ink.clearSelection()
         ink.tool = t
-        for ((tool, b) in toolButtons) mark(b, tool == t)
+        for ((tool, b) in toolButtons) mark(b, tool == t || (tool == Tool.PEN && t == Tool.CALLIGRAPHY))
         optionsBar.visibility = View.GONE
         selectionBar.visibility = if (t == Tool.SELECT) View.VISIBLE else View.GONE
         updateSelectionBar()
@@ -233,19 +244,33 @@ class NotesActivity : Activity(), InkView.Host {
         fun idx(values: List<Float>, v: Float) = values.indices.minByOrNull { Math.abs(values[it] - v) } ?: 0
         fun idxI(values: List<Int>, v: Int) = values.indices.minByOrNull { Math.abs(values[it] - v) } ?: 0
         when (t) {
-            Tool.PEN -> {
+            Tool.PEN, Tool.CALLIGRAPHY -> {
+                val b = tb("") { }
+                b.text = "Style: " + (if (ink.tool == Tool.CALLIGRAPHY) "Calligraphy" else "Pen")
+                b.setOnClickListener {
+                    ink.tool = if (ink.tool == Tool.CALLIGRAPHY) Tool.PEN else Tool.CALLIGRAPHY
+                    showOptions(ink.tool)
+                }
+                optionsBar.addView(b, weight())
+                if (t == Tool.PEN) {
+                    cycle("Width", widthNames, { idx(widthValues, s.penWidth) }) { s.penWidth = widthValues[it] }
+                    cycle("Ink", penGrayNames, { idxI(penGrayValues, s.penGray) }) { s.penGray = penGrayValues[it] }
+                } else {
+                    cycle("Width", widthNames, { idx(widthValues, s.calWidth) }) { s.calWidth = widthValues[it] }
+                    cycle("Ink", penGrayNames, { idxI(penGrayValues, s.calGray) }) { s.calGray = penGrayValues[it] }
+                    cycle("Angle", angleNames, { idx(angleValues, s.calAngle) }) { s.calAngle = angleValues[it] }
+                    cycle("Nib", flatNames, { idx(flatValues, s.calFlat) }) { s.calFlat = flatValues[it] }
+                }
+            }
+            Tool.SHAPE -> {
+                val kinds = UserShape.values().toList()
+                cycle("Shape", kinds.map { it.label }, { kinds.indexOf(s.shapeTool) }) { s.shapeTool = kinds[it] }
                 cycle("Width", widthNames, { idx(widthValues, s.penWidth) }) { s.penWidth = widthValues[it] }
                 cycle("Ink", penGrayNames, { idxI(penGrayValues, s.penGray) }) { s.penGray = penGrayValues[it] }
             }
             Tool.HIGHLIGHTER -> {
                 cycle("Width", widthNames, { idx(widthValues, s.hlWidth) }) { s.hlWidth = widthValues[it] }
                 cycle("Tone", hlGrayNames, { idxI(hlGrayValues, s.hlGray) }) { s.hlGray = hlGrayValues[it] }
-            }
-            Tool.CALLIGRAPHY -> {
-                cycle("Width", widthNames, { idx(widthValues, s.calWidth) }) { s.calWidth = widthValues[it] }
-                cycle("Ink", penGrayNames, { idxI(penGrayValues, s.calGray) }) { s.calGray = penGrayValues[it] }
-                cycle("Angle", angleNames, { idx(angleValues, s.calAngle) }) { s.calAngle = angleValues[it] }
-                cycle("Nib", flatNames, { idx(flatValues, s.calFlat) }) { s.calFlat = flatValues[it] }
             }
             else -> return
         }
@@ -258,13 +283,16 @@ class NotesActivity : Activity(), InkView.Host {
         s.hlWidth = p.getFloat("hlWidth", s.hlWidth); s.hlGray = p.getInt("hlGray", s.hlGray)
         s.calWidth = p.getFloat("calWidth", s.calWidth); s.calGray = p.getInt("calGray", s.calGray)
         s.calAngle = p.getFloat("calAngle", s.calAngle); s.calFlat = p.getFloat("calFlat", s.calFlat)
+        s.shapeSnap = p.getBoolean("shapeSnap", true)
+        s.shapeTool = UserShape.values().getOrElse(p.getInt("shapeTool", UserShape.RECT.ordinal)) { UserShape.RECT }
     }
 
     private fun saveToolSettings() {
         val s = ink.settings
         prefs.edit().putFloat("penWidth", s.penWidth).putInt("penGray", s.penGray).putFloat("hlWidth", s.hlWidth)
             .putInt("hlGray", s.hlGray).putFloat("calWidth", s.calWidth).putInt("calGray", s.calGray)
-            .putFloat("calAngle", s.calAngle).putFloat("calFlat", s.calFlat).apply()
+            .putFloat("calAngle", s.calAngle).putFloat("calFlat", s.calFlat)
+            .putBoolean("shapeSnap", s.shapeSnap).putInt("shapeTool", s.shapeTool.ordinal).apply()
     }
 
     // ---- selection bar -----------------------------------------------------------------------
@@ -300,6 +328,7 @@ class NotesActivity : Activity(), InkView.Host {
             inkModeBtn.text = "Ink mode: " + presets[presetIndex].first
             polishBtn.text = "Polish after writing: " + (if (polish) "on" else "off")
             paperBtn.text = "Paper: " + ink.page.paper.label
+            snapBtn.text = "Hold pen to snap shapes: " + (if (ink.settings.shapeSnap) "on" else "off")
             sideBtn.text = "Pen side button: " + ink.sideButtonTool.name.lowercase()
         }
     }
@@ -406,7 +435,8 @@ class NotesActivity : Activity(), InkView.Host {
             prefs.edit().putInt("side", ink.sideButtonTool.ordinal).apply()
             refreshChrome()
         }
-        for (b in listOf(inkModeBtn, polishBtn, paperBtn, sideBtn,
+        snapBtn = tb("") { ink.settings.shapeSnap = !ink.settings.shapeSnap; saveToolSettings(); refreshChrome() }
+        for (b in listOf(inkModeBtn, polishBtn, snapBtn, paperBtn, sideBtn,
             tb("Import PDF...") { pickPdf() },
             tb("Delete this page") { confirmDeletePage() },
             tb("Full screen refresh now") { eink.fullRefresh(); hideSettings() },
@@ -496,7 +526,7 @@ class NotesActivity : Activity(), InkView.Host {
 
     // ---- keys --------------------------------------------------------------------------------
 
-    private val toolCycle = listOf(Tool.PEN, Tool.HIGHLIGHTER, Tool.CALLIGRAPHY, Tool.ERASER, Tool.SELECT, Tool.HAND)
+    private val toolCycle = listOf(Tool.PEN, Tool.HIGHLIGHTER, Tool.ERASER, Tool.SELECT, Tool.SHAPE, Tool.HAND)
 
     override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
         val code = ev.keyCode
@@ -536,7 +566,23 @@ class NotesActivity : Activity(), InkView.Host {
 
     // ---- lifecycle / saving ------------------------------------------------------------------
 
+    /**
+     * Keeps the notebook as it was at the start of the last two sessions, so a mistake (or a bug) can never
+     * cost more than one session of writing.
+     */
+    private fun rotateBackups() {
+        try {
+            if (!file.exists()) return
+            val dir = file.parentFile ?: return
+            val prev = File(dir, "$notebookName.session-1.bak")
+            val prev2 = File(dir, "$notebookName.session-2.bak")
+            if (prev.exists()) prev.copyTo(prev2, overwrite = true)
+            file.copyTo(prev, overwrite = true)
+        } catch (_: Throwable) { }
+    }
+
     private fun save() {
+        prefs.edit().putInt("lastPage_$notebookName", ink.pageIndex).apply()
         try { NoteStore.save(note, file) } catch (t: Throwable) {
             Toast.makeText(this, "Could not save: $t", Toast.LENGTH_LONG).show()
         }
@@ -574,7 +620,10 @@ class NotesActivity : Activity(), InkView.Host {
                 when (cmd) {
                     "tool_pen" -> selectTool(Tool.PEN)
                     "tool_marker" -> selectTool(Tool.HIGHLIGHTER)
-                    "tool_calli" -> selectTool(Tool.CALLIGRAPHY)
+                    "tool_calli" -> { selectTool(Tool.PEN); ink.tool = Tool.CALLIGRAPHY }
+                    "tool_shape" -> selectTool(Tool.SHAPE)
+                    "shape_kind" -> UserShape.values().firstOrNull { it.name == i.getStringExtra("v") }?.let { ink.settings.shapeTool = it }
+                    "snap" -> { ink.settings.shapeSnap = i.getBooleanExtra("v", true); saveToolSettings() }
                     "tool_erase" -> selectTool(Tool.ERASER)
                     "tool_select" -> selectTool(Tool.SELECT)
                     "tool_hand" -> selectTool(Tool.HAND)
@@ -594,6 +643,11 @@ class NotesActivity : Activity(), InkView.Host {
                     "clear_sel" -> ink.clearSelection()
                     "import_path" -> i.getStringExtra("path")?.let { importPdf(Uri.fromFile(File(it))) }
                     "delete_page" -> { ink.deleteCurrentPage(); refreshChrome() }
+                    "goto" -> { ink.goToPage(i.getIntExtra("v", 1) - 1); refreshChrome() }
+                    "restore_backup" -> {
+                        val b = NoteStore.load(File(filesDir, "notes/notebook1.v2-backup.inkn"))
+                        ink.insertPagesAt(0, b.pages); refreshChrome()
+                    }
                     "gray" -> { ink.settings.penGray = i.getIntExtra("v", 0); ink.settings.hlGray = i.getIntExtra("h", ink.settings.hlGray) }
                 }
                 Log.d("InkDebug", "cmd=$cmd -> ${ink.describe()} einkMode=${EinkController.nameOf(eink.readMode())}")
