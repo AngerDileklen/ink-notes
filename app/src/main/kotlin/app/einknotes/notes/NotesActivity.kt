@@ -33,6 +33,8 @@ import app.einknotes.notes.ui.divider
 import app.einknotes.notes.ui.label
 import java.io.File
 import kotlin.concurrent.thread
+import kotlin.math.max
+import kotlin.math.min
 
 /** In-app clipboard for items (works across pages and notebooks). */
 object Clipboard {
@@ -66,6 +68,7 @@ class NotesActivity : Activity(), InkView.Host {
     /** The notebook changed since it was last written. */
     private var dirty = false
     private var debugReceiver: BroadcastReceiver? = null
+    private lateinit var pdfText: PdfTextEngine
 
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var note: NoteData
@@ -160,6 +163,8 @@ class NotesActivity : Activity(), InkView.Host {
         pdfs = PdfLibrary(this)
         ImageStore.init(this)
         ink = InkView(this, note, pdfs, this)
+        pdfText = PdfTextEngine(this, pdfs)
+        ink.pdfText = pdfText
         ink.sideButtonTool = Tool.values().getOrElse(prefs.getInt("side", Tool.ERASER.ordinal)) { Tool.ERASER }
         loadToolSettings()
 
@@ -454,7 +459,10 @@ class NotesActivity : Activity(), InkView.Host {
                 rows.add(Row("Ruler", onOff(ink.rulerOn) + " - a straight edge you can move and turn") { ink.rulerOn = !ink.rulerOn })
                 rows.add(Row("Hold pen still to snap shapes", onOff(s.shapeSnap)) { s.shapeSnap = !s.shapeSnap; saveToolSettings() })
             }
-            Tool.HIGHLIGHTER -> rows.add(Row("Ruler", onOff(ink.rulerOn)) { ink.rulerOn = !ink.rulerOn })
+            Tool.HIGHLIGHTER -> {
+                rows.add(Row("Snap to the text of PDF pages", onOff(s.textSnap) + " - drag along words and they are highlighted line by line") { s.textSnap = !s.textSnap; saveToolSettings(); reopen() })
+                rows.add(Row("Ruler", onOff(ink.rulerOn)) { ink.rulerOn = !ink.rulerOn })
+            }
             Tool.ERASER -> {
                 rows.add(Row("Mode", if (s.eraserPartial) "Partial: erase only the area touched" else "Whole: erase whole strokes") { s.eraserPartial = !s.eraserPartial; saveToolSettings(); buildWells() })
             }
@@ -476,7 +484,7 @@ class NotesActivity : Activity(), InkView.Host {
         s.eraserPartial = p.getBoolean("eraserPartial", false); s.eraserRadius = p.getFloat("eraserRadius", 18f)
         s.textSize = p.getFloat("textSize", 38f); s.textGray = p.getInt("textGray", 0); s.textBold = p.getBoolean("textBold", false)
         s.smoothing = p.getInt("smoothing", 0)
-        s.zoomTaps = p.getInt("zoomTaps", 3); s.zoomTarget = p.getFloat("zoomTarget", 3f); s.zoomSquares = p.getBoolean("zoomSquares", false); s.autoAdvance = p.getBoolean("autoAdvance", true)
+        s.zoomTaps = p.getInt("zoomTaps", 3); s.zoomTarget = p.getFloat("zoomTarget", 3f); s.zoomSquares = p.getBoolean("zoomSquares", false); s.autoAdvance = p.getBoolean("autoAdvance", true); s.textSnap = p.getBoolean("textSnap", true)
         s.shapeTool = UserShape.values().getOrElse(p.getInt("shapeTool", UserShape.RECT.ordinal)) { UserShape.RECT }
     }
 
@@ -488,7 +496,7 @@ class NotesActivity : Activity(), InkView.Host {
             .putBoolean("eraserPartial", s.eraserPartial).putFloat("eraserRadius", s.eraserRadius)
             .putFloat("textSize", s.textSize).putInt("textGray", s.textGray).putBoolean("textBold", s.textBold)
             .putInt("smoothing", s.smoothing)
-            .putInt("zoomTaps", s.zoomTaps).putFloat("zoomTarget", s.zoomTarget).putBoolean("zoomSquares", s.zoomSquares).putBoolean("autoAdvance", s.autoAdvance)
+            .putInt("zoomTaps", s.zoomTaps).putFloat("zoomTarget", s.zoomTarget).putBoolean("zoomSquares", s.zoomSquares).putBoolean("autoAdvance", s.autoAdvance).putBoolean("textSnap", s.textSnap)
             .putBoolean("shapeSnap", s.shapeSnap).putInt("shapeTool", s.shapeTool.ordinal).apply()
     }
 
@@ -792,6 +800,8 @@ class NotesActivity : Activity(), InkView.Host {
             Row("Paper and page size", ink.page.paper.label) { showPaper() },
             Row("Insert image...") { pickImage() },
             Row("Import PDF into this notebook...") { pickPdf() },
+            Row("Find in this notebook", "PDF text and typed text") { askFind() },
+            Row("PDF outline", if (ink.page.isPdf) "Chapters of this PDF" else "Open a PDF page first", enabled = ink.page.isPdf) { showOutline() },
             Row("Audio recordings", if (note.recordings.isEmpty()) "None yet" else "${note.recordings.size}") { showRecordings() },
             Row("Export as PDF", "Saved to Download/Ink Notes") { exportPdf() },
             Row("Delete this page", "Page ${ink.pageIndex + 1} of ${note.pages.size}") { confirmDeletePage() },
@@ -799,6 +809,71 @@ class NotesActivity : Activity(), InkView.Host {
             Row("Settings") { showSettings() },
             Row("Back to library") { save(); finish() }
         ))
+    }
+
+    // ---- find and outline ----------------------------------------------------------------------------------------
+
+    private fun pageIndexOf(pdfFile: String, pdfPage: Int) = note.pages.indexOfFirst { it.pdfFile == pdfFile && it.pdfPage == pdfPage }
+
+    private fun askFind() {
+        sheet.input("Find in this notebook", lastQuery, hint = "Word or phrase", ok = "Find") { q -> if (q.isNotBlank()) runFind(q.trim()) }
+    }
+
+    private var lastQuery = ""
+
+    private fun runFind(query: String) {
+        if (importing) return
+        lastQuery = query
+        importing = true
+        importText.text = "Searching..."
+        importPanel.visibility = View.VISIBLE
+        thread(name = "find") {
+            val results = ArrayList<Triple<Int, String, SearchHit?>>()      // notebook page index, label, pdf hit
+            try {
+                // typed text
+                for ((pi, pg) in note.pages.withIndex()) for (it in pg.items) {
+                    if (it is TextItem) {
+                        val at = it.text.indexOf(query, ignoreCase = true)
+                        if (at >= 0) results.add(Triple(pi, it.text.substring(max(0, at - 20), min(it.text.length, at + query.length + 40)).replace('\n', ' '), null))
+                    }
+                }
+                // PDF text, one PDF at a time
+                val files = note.pages.mapNotNull { it.pdfFile }.distinct()
+                for ((fi, f) in files.withIndex()) {
+                    val pages = pdfText.ensureIndex(f) { i, n -> ui.post { importText.text = "Reading the text of PDF ${fi + 1} of ${files.size}...\n\npage $i of $n" } }
+                    for (hit in pdfText.search(f, pages, query)) {
+                        val ni = pageIndexOf(f, hit.pdfPage)
+                        if (ni >= 0) results.add(Triple(ni, hit.snippet, hit))
+                    }
+                }
+            } catch (e: Throwable) { Log.w("InkNotes", "find failed", e) }
+            results.sortBy { it.first }
+            ui.post {
+                importPanel.visibility = View.GONE; importing = false
+                if (results.isEmpty()) { say("Nothing found for \"$query\""); return@post }
+                sheet.list("\"$query\": ${results.size} found", results.map { (ni, label, hit) ->
+                    Row("Page ${ni + 1}", label) {
+                        ink.goToPage(ni); refreshChrome()
+                        if (hit != null) ink.showHits(pdfText.hitRects(hit.pdfFile, hit.pdfPage, query))
+                    }
+                })
+            }
+        }
+    }
+
+    private fun showOutline() {
+        val pg = ink.page
+        val f = pg.pdfFile ?: return
+        thread(name = "outline") {
+            val entries = pdfText.outline(f)
+            ui.post {
+                if (entries.isEmpty()) { say("This PDF has no outline"); return@post }
+                sheet.list("PDF outline", entries.map { e ->
+                    val ni = pageIndexOf(f, e.pdfPage)
+                    Row("    ".repeat(e.level.coerceAtMost(4)) + e.title.ifBlank { "(untitled)" }, "page ${e.pdfPage + 1}", enabled = ni >= 0) { ink.goToPage(ni); refreshChrome() }
+                })
+            }
+        }
     }
 
     private fun mmOf(units: Float) = units / 6.686f
@@ -1032,6 +1107,7 @@ class NotesActivity : Activity(), InkView.Host {
         if (!ready) { eink.restoreNow(); super.onDestroy(); return }
         if (AudioNotes.active != null) stopRecording()
         if (AudioNotes.playing != null) AudioNotes.stopPlayback()
+        try { pdfText.close() } catch (_: Throwable) { }
         ui.removeCallbacks(playTick); ui.removeCallbacks(recTick)
         eink.restoreNow()
         super.onDestroy()
@@ -1075,6 +1151,8 @@ class NotesActivity : Activity(), InkView.Host {
                             }, k * 230L + 70L)
                         }
                     }
+                    "find" -> runFind(i.getStringExtra("q") ?: "the")
+                    "outline" -> showOutline()
                     "paper_sheet" -> showPaper()
                     "page_size" -> PageSize.values().firstOrNull { it.name == i.getStringExtra("v") }?.let { ink.setPageSize(it); refreshChrome() }
                     "spacing" -> ink.setSpacing(i.getFloatExtra("v", 64f))

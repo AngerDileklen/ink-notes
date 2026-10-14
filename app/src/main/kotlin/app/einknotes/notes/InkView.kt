@@ -55,6 +55,8 @@ class ToolSettings {
     var zoomSquares = false
     /** While zoomed in, the view moves along by itself when the pen lifts near the right edge. */
     var autoAdvance = true
+    /** The highlighter snaps to the text lines of a PDF page. */
+    var textSnap = true
 }
 
 /** How far the pen position moves toward the real position at each sample, for smoothing off / light / strong. */
@@ -149,6 +151,16 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             postDelayed(this, 120)
         }
     }
+
+    /** Text layer of the imported PDFs (search, highlight along text). */
+    var pdfText: PdfTextEngine? = null
+    private val textExecutor = Executors.newSingleThreadExecutor()
+
+    /** Where the last search found its words on this page, in page units. Cleared by the next pen touch. */
+    private var hitRects: List<RectF> = emptyList()
+    private val hitPaint = Paint().apply { style = Paint.Style.STROKE; color = Color.BLACK; strokeWidth = 5f; pathEffect = DashPathEffect(floatArrayOf(14f, 8f), 0f) }
+
+    fun showHits(rects: List<RectF>) { hitRects = rects; invalidate() }
 
     // audio: items written while a recording runs remember which recording and when
     var recId = 0
@@ -262,10 +274,20 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     // ---- page operations ---------------------------------------------------------------------
 
+    /** Reads the text of the PDF page being shown in the background, so highlighting is instant. */
+    private fun prefetchText() {
+        val engine = pdfText ?: return
+        val f = page.pdfFile ?: return
+        val idx = page.pdfPage
+        textExecutor.execute { engine.pageText(f, idx) }
+    }
+
     fun goToPage(i: Int) {
         if (i !in note.pages.indices || i == pageIndex) return
         clearSelection()
+        hitRects = emptyList()
         pageIndex = i
+        prefetchText()
         fitToView(keepZoom = true)
         transformChanged()
         rebuild()
@@ -592,6 +614,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         if (selMode == SelMode.LASSO) canvas.drawPath(lasso, selDash)
         previewShape?.let { renderer.drawItem(canvas, it, scale, tx, ty) }
         tapePreview?.let { canvas.drawRect(it, selDash) }
+        for (h in hitRects) canvas.drawRect(tx + h.left * scale - 4f, ty + h.top * scale - 4f, tx + h.right * scale + 4f, ty + h.bottom * scale + 4f, hitPaint)
         if (rulerOn) drawRuler(canvas)
     }
 
@@ -731,6 +754,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                 host.onPenDown()
                 lastVx = e.x; lastVy = e.y
                 removeCallbacks(advance)
+                if (hitRects.isNotEmpty()) { hitRects = emptyList(); invalidate() }
                 tapDownTime = SystemClock.uptimeMillis(); tapDownX = e.x; tapDownY = e.y
                 tapEligible = settings.zoomTaps > 0 && zoomTapTool(active)
                 when (active) {
@@ -990,6 +1014,24 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             push(Cmd.Add(page, listOf(snapped)))
             host.onDocumentChanged()
             return
+        }
+        if (brush == Brush.HIGHLIGHTER && settings.textSnap && page.isPdf && liveXs.size >= 2) {
+            val rects = pdfText?.highlightRects(page.pdfFile!!, page.pdfPage, liveXs[0], liveYs[0], liveXs[liveXs.size - 1], liveYs[liveYs.size - 1])
+            if (rects != null) {
+                val added = rects.map { r ->
+                    val h = r.height() * 1.08f
+                    val ws = h / HIGHLIGHTER_WIDTH
+                    val half = h / 2f
+                    val x0 = min(r.left + half, r.centerX()); val x1 = max(r.right - half, r.centerX())
+                    val cy = r.centerY()
+                    Stroke(Brush.HIGHLIGHTER, settings.hlGray, ws, floatArrayOf(x0, x1), floatArrayOf(cy, cy), floatArrayOf(0.5f, 0.5f)).also { stamp(it, strokeMs) }
+                }
+                page.items.addAll(added)
+                push(Cmd.Add(page, added))
+                rebuild()
+                host.onDocumentChanged()
+                return
+            }
         }
         if (liveXs.size >= 1) {
             val s = Stroke(brush, grayFor(brush), widthFor(brush), liveXs.toArray(), liveYs.toArray(), livePs.toArray(),

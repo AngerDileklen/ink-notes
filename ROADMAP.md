@@ -72,7 +72,7 @@ Source: `clipbrain-ios/research/notability-teardown/REPORT-2-UX.md` (screens, to
 | 2 | E-ink UI kit: icon toolbar with width/grey wells, context bar, flat sheets instead of dialogs, paged Settings, library (favorites, recent, sort, Recently Deleted) | MOSTLY DONE (v0.12: icon toolbar + wells, sheets, Settings, paged library with Recently deleted; Pages panel still uses old dialogs) |
 | 3 | Long column of pages that jumps a screen at a time; page X of N; Pointer tool | |
 | 4 | Zoom window, cosine smoothing + pressure limiter, Notability widths and pen styles, pencil, eraser priority + auto-deselect, box select + arrange/flip, playback dimming and speeds, 500 ms snap | |
-| 5 | PDF text via pdfium: find with hit highlights, highlight text lines, copy text, outline | |
+| 5 | PDF text via pdfium: find with hit highlights, highlight text lines, copy text, outline | DONE except copy text (v0.14: Marker snaps to PDF text lines; More > Find in this notebook (PDF + typed text, hits outlined on the page); More > PDF outline) |
 | 6 | Paper sizes (Letter, A4, A5...), about 20 templates drawn in code with a picker, culling/caching, refresh policy | |
 | 7 | AI with the user's key (OpenRouter, Gemini, OpenAI, Anthropic): summary, flashcards + quiz, audio transcript, ask about this page/PDF | |
 
