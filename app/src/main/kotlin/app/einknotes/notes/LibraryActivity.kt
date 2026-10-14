@@ -92,7 +92,7 @@ class LibraryActivity : Activity() {
     /** Debug builds only: adb shell am broadcast -a app.einknotes.LIBRARY --es cmd restore_path --es path /sdcard/Download/x.inkz */
     private fun registerDebugControl() {
         if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
-        registerReceiver(object : android.content.BroadcastReceiver() {
+        debugReceiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(c: android.content.Context, i: Intent) {
                 when (i.getStringExtra("cmd")) {
                     "restore_path" -> i.getStringExtra("path")?.let { restore(Uri.fromFile(File(it))) }
@@ -106,7 +106,15 @@ class LibraryActivity : Activity() {
                     "delete" -> entries().firstOrNull { it.id == i.getStringExtra("id") }?.let { deleteNotebook(it) }
                 }
             }
-        }, android.content.IntentFilter("app.einknotes.LIBRARY"))
+        }
+        registerReceiver(debugReceiver, android.content.IntentFilter("app.einknotes.LIBRARY"))
+    }
+
+    private var debugReceiver: android.content.BroadcastReceiver? = null
+
+    override fun onDestroy() {
+        debugReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) { } }
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleIncoming(intent) }
@@ -202,7 +210,13 @@ class LibraryActivity : Activity() {
 
     // ---- actions -----------------------------------------------------------------------------
 
+    private var lastOpenAt = 0L
+
     private fun open(id: String) {
+        // a double tap must not start two editors on the same notebook
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastOpenAt < 1500) return
+        lastOpenAt = now
         startActivity(Intent(this, NotesActivity::class.java).putExtra("notebook", id))
     }
 
@@ -308,7 +322,9 @@ class LibraryActivity : Activity() {
         AlertDialog.Builder(this).setTitle("Rename notebook").setView(input)
             .setPositiveButton("Rename") { _, _ ->
                 val t = input.text.toString().trim().ifEmpty { "Untitled" }
-                try { NoteStore.rename(e.file, t) } catch (_: Throwable) { }
+                try { NoteStore.rename(e.file, t) } catch (_: Throwable) {
+                    Toast.makeText(this, "That notebook could not be read, so it was not renamed", Toast.LENGTH_LONG).show()
+                }
                 refresh()
             }
             .setNegativeButton("Cancel", null).show()
@@ -325,6 +341,7 @@ class LibraryActivity : Activity() {
         for (f in dir.listFiles() ?: emptyArray()) if (f.name.startsWith(e.id + ".")) f.delete()
         // PDFs, pictures and audio that no remaining notebook uses can go too
         val usedPdfs = HashSet<String>(); val usedImages = HashSet<String>(); val usedAudio = HashSet<String>()
+        var allRead = true
         for (x in entries()) try {
             val n = NoteStore.load(x.file)
             n.pages.forEach { p ->
@@ -332,10 +349,13 @@ class LibraryActivity : Activity() {
                 p.items.forEach { item -> if (item is ImageItem) usedImages.add(item.file) }
             }
             n.recordings.forEach { r -> usedAudio.add(r.file) }
-        } catch (_: Throwable) { }
-        pdfs.collectGarbage(usedPdfs)
-        ImageStore.init(this); ImageStore.collectGarbage(usedImages)
-        AudioNotes.collectGarbage(this, usedAudio)
+        } catch (_: Throwable) { allRead = false }
+        // If any notebook could not be read we cannot know what it uses, so nothing is cleaned up.
+        if (allRead) {
+            pdfs.collectGarbage(usedPdfs)
+            ImageStore.init(this); ImageStore.collectGarbage(usedImages)
+            AudioNotes.collectGarbage(this, usedAudio)
+        }
         prefs.edit().remove("folder_${e.id}").apply()
         refresh()
     }

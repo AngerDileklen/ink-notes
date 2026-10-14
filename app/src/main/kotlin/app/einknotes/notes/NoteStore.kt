@@ -22,12 +22,13 @@ import java.io.FileOutputStream
  *      type 3 text:   text utf | x,y,boxW,size floats | gray int | bold byte
  *      type 4 image:  file utf | l,t,r,b floats | srcW int | srcH int
  *      type 5 tape:   l,t,r,b floats | covered byte
+*   v6: text-box text is an int byte length + UTF-8 bytes (no 64 KB limit)
  *   v5: every item is followed by recId int | recMs int; after the last page: recordingCount int, per recording id int | file utf | startedAt long | durationMs int
  *   (v1/v2 items are strokes without a type byte; v1 pages have no size or pdf fields)
  */
 object NoteStore {
     private const val MAGIC = 0x494E4B4E   // "INKN"
-    private const val VERSION = 5
+    private const val VERSION = 6
 
     const val ITEM_STROKE = 1
     const val ITEM_SHAPE = 2
@@ -37,11 +38,20 @@ object NoteStore {
 
     class Header(val title: String, val created: Long, val modified: Long, val pageCount: Int)
 
-    fun save(note: NoteData, file: File) {
+    /** The file exists but cannot be read. Callers must never save over it. */
+    class Unreadable(val file: File, cause: Throwable) : java.io.IOException("Cannot read ${file.name}: ${cause.message}", cause)
+
+    /**
+     * Writes the notebook to a temp file, forces it to the storage chip, then renames it over the old file.
+     * rename() replaces the old file in one step, so a crash or power cut leaves either the old or the new file.
+     * [touch] = false keeps the "edited" time (used when nothing was changed).
+     */
+    fun save(note: NoteData, file: File, touch: Boolean = true) {
         file.parentFile?.mkdirs()
-        note.modified = System.currentTimeMillis()
+        if (touch) note.modified = System.currentTimeMillis()
         val tmp = File(file.parentFile, file.name + ".tmp")
-        DataOutputStream(BufferedOutputStream(FileOutputStream(tmp), 1 shl 16)).use { out ->
+        val fos = FileOutputStream(tmp)
+        DataOutputStream(BufferedOutputStream(fos, 1 shl 16)).use { out ->
             out.writeInt(MAGIC); out.writeInt(VERSION)
             out.writeUTF(note.title); out.writeLong(note.created); out.writeLong(note.modified)
             out.writeInt(note.pages.size)
@@ -57,9 +67,22 @@ object NoteStore {
             }
             out.writeInt(note.recordings.size)
             for (r in note.recordings) { out.writeInt(r.id); out.writeUTF(r.file); out.writeLong(r.startedAt); out.writeInt(r.durationMs) }
+            out.flush()
+            fos.fd.sync()
         }
-        if (file.exists()) file.delete()
         if (!tmp.renameTo(file)) throw java.io.IOException("could not move ${tmp.name} into place")
+    }
+
+    fun writeLongUtf(out: DataOutputStream, s: String) {
+        val b = s.toByteArray(Charsets.UTF_8)
+        out.writeInt(b.size); out.write(b)
+    }
+
+    fun readLongUtf(inp: DataInputStream): String {
+        val n = inp.readInt()
+        require(n in 0..(64 shl 20)) { "bad text length $n" }
+        val b = ByteArray(n); inp.readFully(b)
+        return String(b, Charsets.UTF_8)
     }
 
     private fun writeItem(out: DataOutputStream, item: Item) {
@@ -80,7 +103,7 @@ object NoteStore {
             }
             is TextItem -> {
                 out.writeByte(ITEM_TEXT)
-                out.writeUTF(item.text)
+                writeLongUtf(out, item.text)
                 out.writeFloat(item.x); out.writeFloat(item.y); out.writeFloat(item.boxW); out.writeFloat(item.size)
                 out.writeInt(item.gray); out.writeByte(if (item.bold) 1 else 0)
             }
@@ -99,11 +122,11 @@ object NoteStore {
         }
     }
 
-    /** Changes a notebook's title. */
+    /** Changes a notebook's title. Throws [Unreadable] rather than touching a damaged file. */
     fun rename(file: File, title: String) {
         val note = load(file)
         note.title = title
-        save(note, file)
+        save(note, file, touch = false)
     }
 
     /** Reads just enough of the file to list it in the library. Never throws; returns null for unreadable files. */
@@ -123,14 +146,17 @@ object NoteStore {
         } catch (_: Throwable) { null }
     }
 
-    /** Returns the saved notebook, or a fresh one when there is nothing (or nothing readable) yet. */
+    /**
+     * Returns the saved notebook, or a fresh one when the file does not exist yet.
+     * Throws [Unreadable] when the file exists but is damaged; the file is left exactly as it is.
+     */
     fun load(file: File, defaultTitle: String = "Notebook"): NoteData {
         if (!file.exists()) return NoteData(defaultTitle)
         return try {
             DataInputStream(BufferedInputStream(FileInputStream(file), 1 shl 16)).use { inp ->
                 require(inp.readInt() == MAGIC) { "not a notebook file" }
                 val version = inp.readInt()
-                require(version in 1..5) { "unknown notebook version" }
+                require(version in 1..6) { "unknown notebook version" }
                 val note = if (version >= 3) {
                     val title = inp.readUTF(); val created = inp.readLong(); val modified = inp.readLong()
                     NoteData(title, created).also { it.modified = modified }
@@ -158,9 +184,7 @@ object NoteStore {
                 note
             }
         } catch (t: Throwable) {
-            // Keep the unreadable file for inspection instead of silently overwriting it.
-            try { file.renameTo(File(file.parentFile, file.name + ".broken-" + System.currentTimeMillis())) } catch (_: Throwable) { }
-            NoteData(defaultTitle)
+            throw Unreadable(file, t)
         }
     }
 
@@ -193,7 +217,7 @@ object NoteStore {
                 ShapeItem(kind, pts, closed, gray, ws)
             }
             ITEM_TEXT -> {
-                val text = inp.readUTF()
+                val text = if (version >= 6) readLongUtf(inp) else inp.readUTF()
                 val x = inp.readFloat(); val y = inp.readFloat(); val w = inp.readFloat(); val size = inp.readFloat()
                 val gray = inp.readInt(); val bold = inp.readByte().toInt() == 1
                 TextItem(text, x, y, w, size, gray, bold)

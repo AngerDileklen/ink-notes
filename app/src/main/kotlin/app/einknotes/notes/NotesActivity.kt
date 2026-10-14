@@ -46,6 +46,20 @@ object Clipboard {
  */
 class NotesActivity : Activity(), InkView.Host {
 
+    companion object {
+        /** The editor that is open right now (at most one per notebook may live). */
+        @Volatile private var live: NotesActivity? = null
+        private var crashHandlerInstalled = false
+    }
+
+    /** False until the notebook loaded and the screen was built; nothing is saved before that. */
+    private var ready = false
+    /** True once a newer editor took over this notebook: this one must never save again. */
+    private var retired = false
+    /** The notebook changed since it was last written. */
+    private var dirty = false
+    private var debugReceiver: BroadcastReceiver? = null
+
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var note: NoteData
     private lateinit var ink: InkView
@@ -122,8 +136,12 @@ class NotesActivity : Activity(), InkView.Host {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         eink = EinkController(this)
-        val prev = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { t, e -> eink.restoreNow(); prev?.uncaughtException(t, e) }
+        if (!crashHandlerInstalled) {
+            // One handler for the whole process: hand the panel mode back whichever editor is open.
+            crashHandlerInstalled = true
+            val prev = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { t, e -> try { live?.eink?.restoreNow() } catch (_: Throwable) { }; prev?.uncaughtException(t, e) }
+        }
 
         presetIndex = prefs.getInt("preset", 1).coerceIn(0, presets.size - 1)
         polish = prefs.getBoolean("polish", false)
@@ -132,8 +150,15 @@ class NotesActivity : Activity(), InkView.Host {
         notebookName = intent?.getStringExtra("notebook")?.filter { it.isLetterOrDigit() || it == '_' }
             ?.ifEmpty { null } ?: "notebook1"
         file = File(filesDir, "notes/$notebookName.inkn")
+        note = try { NoteStore.load(file) } catch (e: NoteStore.Unreadable) {
+            Log.e("InkNotes", "notebook unreadable", e)
+            showUnreadable()
+            return
+        }
+        // An older editor of the same notebook (still in the back stack) would later save stale pages: retire it.
+        live?.let { old -> if (old !== this && old.notebookName == notebookName) { old.retired = true; old.finish() } }
+        live = this
         rotateBackups()
-        note = NoteStore.load(file)
         pdfs = PdfLibrary(this)
         ImageStore.init(this)
         ink = InkView(this, note, pdfs, this)
@@ -195,6 +220,37 @@ class NotesActivity : Activity(), InkView.Host {
         refreshChrome()
         registerDebugControl()
         handleIncoming(intent)
+        ready = true
+    }
+
+    /**
+     * The notebook file exists but cannot be read. Nothing is saved over it; the person can put back one of the
+     * automatic backups (the damaged file is kept next to it).
+     */
+    private fun showUnreadable() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE); setPadding(48, 120, 48, 48) }
+        box.addView(TextView(this).apply {
+            text = "This notebook could not be opened.\n\nIt has not been changed. You can put back an automatic backup below " +
+                "(the damaged copy is kept), or go back to the library."
+            textSize = 20f; setTextColor(Color.BLACK)
+        })
+        val dir = file.parentFile!!
+        val fmt = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.getDefault())
+        val candidates = listOf("session-1.bak", "session-2.bak", "pre-library.bak", "v2-backup.inkn")
+            .map { File(dir, "$notebookName.$it") }
+            .filter { f -> f.exists() && try { NoteStore.load(f); true } catch (_: Throwable) { false } }
+        for (f in candidates) {
+            box.addView(tb("Restore backup from ${fmt.format(java.util.Date(f.lastModified()))}") {
+                try {
+                    file.copyTo(File(dir, "$notebookName.damaged-${System.currentTimeMillis()}"), overwrite = false)
+                    f.copyTo(file, overwrite = true)
+                    recreate()
+                } catch (t: Throwable) { Toast.makeText(this, "Could not restore: ${t.message}", Toast.LENGTH_LONG).show() }
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 24 })
+        }
+        if (candidates.isEmpty()) box.addView(TextView(this).apply { text = "\nNo readable backup was found."; textSize = 18f; setTextColor(Color.BLACK) })
+        box.addView(tb("Back to library") { finish() }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 24 })
+        setContentView(box)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -424,7 +480,7 @@ class NotesActivity : Activity(), InkView.Host {
         try {
             val rec = AudioNotes.start(this, note)
             ink.recId = rec.id; ink.recStart = AudioNotes.startedElapsed()
-            save()
+            dirty = true; save()
             updateRecButton()
             ui.removeCallbacks(recTick); ui.postDelayed(recTick, 10000)
         } catch (e: Throwable) {
@@ -437,7 +493,7 @@ class NotesActivity : Activity(), InkView.Host {
         AudioNotes.stopRecording(this, note)
         ink.recId = 0
         updateRecButton()
-        save()
+        dirty = true; save()
     }
 
     private fun updateRecButton() {
@@ -464,7 +520,7 @@ class NotesActivity : Activity(), InkView.Host {
             .setItems(arrayOf("Play", "Delete")) { _, which ->
                 if (which == 0) startPlayback(r, 0)
                 else AlertDialog.Builder(this).setMessage("Delete recording ${r.id}? The sound is removed; your writing stays.")
-                    .setPositiveButton("Delete") { _, _ -> AudioNotes.delete(this, note, r); stopPlaybackUi(); save() }
+                    .setPositiveButton("Delete") { _, _ -> AudioNotes.delete(this, note, r); stopPlaybackUi(); dirty = true; save() }
                     .setNegativeButton("Keep", null).show()
             }.setNegativeButton("Back", null).show()
     }
@@ -763,6 +819,7 @@ class NotesActivity : Activity(), InkView.Host {
     }
 
     override fun onDocumentChanged() {
+        dirty = true
         refreshChrome()
         updateSelectionBar()
         ui.removeCallbacks(saveNow)
@@ -774,7 +831,10 @@ class NotesActivity : Activity(), InkView.Host {
     private val toolCycle = listOf(Tool.PEN, Tool.HIGHLIGHTER, Tool.ERASER, Tool.SELECT, Tool.SHAPE, Tool.TEXT, Tool.TAPE, Tool.HAND)
 
     override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
+        if (!ready) return super.dispatchKeyEvent(ev)
         val code = ev.keyCode
+        // While a PDF is imported or exported the pages must not change underneath it.
+        if (importing && code != KeyEvent.KEYCODE_BACK) return true
         if (settingsPanel.visibility == View.VISIBLE && code == KeyEvent.KEYCODE_BACK) {
             if (ev.action == KeyEvent.ACTION_UP) hideSettings()
             return true
@@ -830,29 +890,39 @@ class NotesActivity : Activity(), InkView.Host {
         } catch (_: Throwable) { }
     }
 
-    private fun save() {
+    /** Writes the notebook if it changed (or always, with [force]). Never from a retired or half-built editor. */
+    private fun save(force: Boolean = false) {
+        if (!ready || retired) return
         prefs.edit().putInt("lastPage_$notebookName", ink.pageIndex).apply()
-        try { NoteStore.save(note, file) } catch (t: Throwable) {
+        if (!dirty && !force && file.exists()) return
+        try { NoteStore.save(note, file, touch = dirty || !file.exists()); dirty = false } catch (t: Throwable) {
             Toast.makeText(this, "Could not save: $t", Toast.LENGTH_LONG).show()
         }
     }
 
     override fun onResume() {
         super.onResume()
+        if (!ready) return
         if (::devStatus.isInitialized && settingsPanel.visibility == View.VISIBLE) updateDevStatus()
     }
 
     // The panel mode is system-wide, so always hand it back when we leave.
     override fun onPause() {
+        eink.restoreNow()
+        if (!ready) { super.onPause(); return }
         ui.removeCallbacks(settleToQuality); ui.removeCallbacks(saveNow)
         inFast = false
-        eink.restoreNow()
+        val changed = dirty
         save()
-        try { Thumbnailer.save(note.pages[0], pdfs, 360, File(file.parentFile, "$notebookName.png")) } catch (_: Throwable) { }
+        if (changed && !retired) try { Thumbnailer.save(note.pages[0], pdfs, 360, File(file.parentFile, "$notebookName.png")) } catch (_: Throwable) { }
         super.onPause()
     }
 
     override fun onDestroy() {
+        debugReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) { } }
+        debugReceiver = null
+        if (live === this) live = null
+        if (!ready) { eink.restoreNow(); super.onDestroy(); return }
         if (AudioNotes.active != null) stopRecording()
         if (AudioNotes.playing != null) AudioNotes.stopPlayback()
         ui.removeCallbacks(playTick); ui.removeCallbacks(recTick)
@@ -867,7 +937,7 @@ class NotesActivity : Activity(), InkView.Host {
      */
     private fun registerDebugControl() {
         if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
-        registerReceiver(object : BroadcastReceiver() {
+        debugReceiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context, i: Intent) {
                 val cmd = i.getStringExtra("cmd") ?: return
                 when (cmd) {
@@ -903,7 +973,7 @@ class NotesActivity : Activity(), InkView.Host {
                     "zoom_in" -> ink.zoomBy(1)
                     "zoom_out" -> ink.zoomBy(-1)
                     "add_page" -> ink.addPageAfterCurrent()
-                    "save" -> save()
+                    "save" -> save(force = true)
                     "select_all" -> ink.selectAll()
                     "delete_sel" -> ink.deleteSelection()
                     "copy_sel" -> { Clipboard.items = ink.copySelection(); updateSelectionBar() }
@@ -916,14 +986,11 @@ class NotesActivity : Activity(), InkView.Host {
                     "pages_open" -> showPages()
                     "pages_close" -> hidePages()
                     "goto" -> { ink.goToPage(i.getIntExtra("v", 1) - 1); refreshChrome() }
-                    "restore_backup" -> {
-                        val b = NoteStore.load(File(filesDir, "notes/notebook1.v2-backup.inkn"))
-                        ink.insertPagesAt(0, b.pages); refreshChrome()
-                    }
                     "gray" -> { ink.settings.penGray = i.getIntExtra("v", 0); ink.settings.hlGray = i.getIntExtra("h", ink.settings.hlGray) }
                 }
                 Log.d("InkDebug", "cmd=$cmd -> ${ink.describe()} einkMode=${EinkController.nameOf(eink.readMode())}")
             }
-        }, IntentFilter("app.einknotes.DEBUG"))
+        }
+        registerReceiver(debugReceiver, IntentFilter("app.einknotes.DEBUG"))
     }
 }
