@@ -48,7 +48,7 @@ Status: DONE / NEXT / LATER / SKIP (with reason)
 ## Recognition and audio
 | Feature | Plan | Status |
 |---|---|---|
-| Handwriting search | Hanvon's MyScript service is NOT usable (no binder; reads strokes from hvNote's own content provider; licence bound to their app). Needs an open on-device model bundled with the app (e.g. ONNX Runtime + a recogniser) | LATER (research) |
+| Handwriting search | (User declined the 65 MB model download on 2026-10-14; plan was TrOCR small handwritten, ONNX Runtime, line segmentation from strokes.) Hanvon's MyScript service is NOT usable (no binder; reads strokes from hvNote's own content provider; licence bound to their app). Needs an open on-device model bundled with the app (e.g. ONNX Runtime + a recogniser) | LATER (research) |
 | Handwriting to text | Same | LATER |
 | Math recognition | Same | SKIP for now |
 | OCR of images and scans | Not now | SKIP |
