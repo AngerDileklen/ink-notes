@@ -9,6 +9,10 @@
     <!-- Audio notes: record a lecture while writing. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Ink Drop (the file-sharing app) hands received books to the Books tab; only apps signed with our key may. -->
+    <permission
+        android:name="app.einknotes.permission.ADD_BOOKS"
+        android:protectionLevel="signature" />
 
     <application
         android:allowBackup="false"
@@ -71,6 +75,16 @@
                 <data android:mimeType="application/epub+zip" />
             </intent-filter>
         </activity>
+
+        <!-- Books arriving through Ink Drop. -->
+        <receiver
+            android:name=".reader.BookDropReceiver"
+            android:exported="true"
+            android:permission="app.einknotes.permission.ADD_BOOKS">
+            <intent-filter>
+                <action android:name="app.einknotes.ADD_BOOK" />
+            </intent-filter>
+        </receiver>
 
         <!-- The ebook reader. -->
         <activity
