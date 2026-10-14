@@ -229,7 +229,9 @@ class NotesActivity : Activity(), InkView.Host {
 
         frame = FrameLayout(this)
         frame.addView(root)
-        pagesPanel = PagesPanel(this, note, pdfs, ink, { hidePages() }, { i -> ink.goToPage(i); hidePages(); refreshChrome() })
+        sheet = Sheet(this, frame)
+        notice = Notice(frame)
+        pagesPanel = PagesPanel(this, note, pdfs, ink, sheet, { hidePages() }, { i -> ink.goToPage(i); hidePages(); refreshChrome() })
         pagesPanel.visibility = View.GONE
         frame.addView(pagesPanel)
         importPanel = LinearLayout(this).apply {
@@ -240,8 +242,6 @@ class NotesActivity : Activity(), InkView.Host {
         importPanel.addView(importText)
         frame.addView(importPanel)
         setContentView(frame)
-        sheet = Sheet(this, frame)
-        notice = Notice(frame)
     }
 
     private fun icon(name: String, text: String?, onClick: () -> Unit) =
