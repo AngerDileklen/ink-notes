@@ -12,8 +12,8 @@ android {
         minSdk = 28
         // The tablet runs Android 11. Targeting 29 keeps simple file access for the probe's report.
         targetSdk = 29
-        versionCode = 22
-        versionName = "0.17.0-polish"
+        versionCode = 23
+        versionName = "0.18.0-reader"
     }
 
     buildTypes {

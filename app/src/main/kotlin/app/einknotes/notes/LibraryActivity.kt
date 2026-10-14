@@ -91,6 +91,10 @@ class LibraryActivity : Activity() {
         head.addView(btn("pdf", "Import PDF") { pickPdf() }, LinearLayout.LayoutParams(170, Eink.BAR_H + 8))
         head.addView(btn("export", "Restore") { pickBackup() }, LinearLayout.LayoutParams(150, Eink.BAR_H + 8))
         root.addView(head)
+        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        tabs.addView(EButton(this, null, "Notebooks") { }.apply { textSize = 28f; selectedState = true }, LinearLayout.LayoutParams(0, Eink.BAR_H - 10, 1f).apply { setMargins(0, 4, 6, 4) })
+        tabs.addView(EButton(this, null, "Books") { startActivity(Intent(this, app.einknotes.reader.BooksActivity::class.java)); overridePendingTransition(0, 0) }.apply { textSize = 28f }, LinearLayout.LayoutParams(0, Eink.BAR_H - 10, 1f).apply { setMargins(6, 4, 0, 4) })
+        root.addView(tabs)
 
         sectionBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         root.addView(sectionBar, LinearLayout.LayoutParams(-1, Eink.BAR_H).apply { topMargin = 8 })

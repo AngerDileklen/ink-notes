@@ -5,3 +5,6 @@ dist/
 reports/
 *.apk
 .idea/
+
+# built from data on the SSD by scripts/build_dict.py
+app/src/main/assets/dict.db

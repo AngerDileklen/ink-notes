@@ -49,6 +49,36 @@
             android:exported="true"
             android:label="Ink Notes" />
 
+        <!-- The reading library; also receives ebook files from a file manager. -->
+        <activity
+            android:name=".reader.BooksActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:label="Ink Notes Books">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" android:mimeType="application/epub+zip" />
+                <data android:scheme="file" android:mimeType="application/epub+zip" />
+                <data android:scheme="content" android:mimeType="application/x-fictionbook+xml" />
+                <data android:scheme="content" android:mimeType="application/x-mobipocket-ebook" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/epub+zip" />
+            </intent-filter>
+        </activity>
+
+        <!-- The ebook reader. -->
+        <activity
+            android:name=".reader.ReaderActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"
+            android:exported="false"
+            android:label="Ink Notes Reader" />
+
         <!-- Keeps the app alive while a recording runs with the screen off. -->
         <service
             android:name=".notes.RecordingService"

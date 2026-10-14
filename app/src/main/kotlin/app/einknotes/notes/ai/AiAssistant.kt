@@ -43,7 +43,6 @@ class AiAssistant(
     private val startStudy: (StudySet, Boolean) -> Unit,       // set, quiz?
     private val markChanged: () -> Unit
 ) {
-    private val prefs = act.getSharedPreferences("ai", Context.MODE_PRIVATE)
     private val notesDir = File(act.filesDir, "notes")
     val study: StudySet by lazy { StudySet.load(StudySet.fileFor(notesDir, notebookId)) }
 
@@ -51,52 +50,12 @@ class AiAssistant(
 
     fun dropTranscript(recId: Int) { if (study.transcripts.remove(recId) != null) saveStudy() }
 
-    // ---- settings -------------------------------------------------------------------------------------------------
+    // ---- settings (shared with the book reader) -------------------------------------------------------------------
 
-    private fun provider(): Provider = Provider.values().firstOrNull { it.name == prefs.getString("provider", null) } ?: Provider.GEMINI
-    private fun key(p: Provider) = prefs.getString("key_${p.name}", "") ?: ""
-    private fun model(p: Provider) = prefs.getString("model_${p.name}", null)?.takeIf { it.isNotBlank() } ?: p.defaultModel
-    fun config(): AiConfig { val p = provider(); return AiConfig(p, key(p), model(p)) }
-
-    fun showSettings() {
-        val p = provider()
-        val k = key(p)
-        sheet.list("AI service", listOf(
-            Row("Service", p.label) {
-                sheet.choose("AI service", Provider.values().map { it.label to it }, p) { prefs.edit().putString("provider", it.name).apply(); showSettings() }
-            },
-            Row("API key", if (k.isEmpty()) "Not set - get one ${p.keyHelp}" else "Set (ends in ${k.takeLast(4)})") {
-                sheet.input("API key for ${p.label}", "", hint = "Paste or type the key", password = true, ok = "Save") { v ->
-                    prefs.edit().putString("key_${p.name}", v.trim()).apply(); showSettings()
-                }
-            },
-            Row("Model", model(p)) {
-                sheet.input("Model name", model(p), hint = p.defaultModel, ok = "Save") { v -> prefs.edit().putString("model_${p.name}", v.trim()).apply(); showSettings() }
-            },
-            Row("Test the connection", "Sends one short message") { test() },
-            Row("Remove the key", enabled = k.isNotEmpty()) { prefs.edit().remove("key_${p.name}").apply(); showSettings() },
-            Row("What is sent", "Only when you tap an AI action: the page picture and its text, or the recording. The key stays on this tablet.", enabled = false) { }
-        ))
-    }
-
-    private fun test() {
-        val cfg = config()
-        if (!cfg.ready) { say("Add your API key first"); return }
-        work("Testing ${cfg.provider.label}...")
-        thread(name = "ai-test") {
-            val r = try { "Connected: " + AiClient.complete(cfg, "Reply briefly.", "Reply with the single word OK.").take(40) } catch (e: AiException) { e.message ?: "Failed" }
-            android.util.Log.d("InkDebug", "ai test (${cfg.provider.name}): $r")
-            ui.post { work(null); say(r) }
-        }
-    }
-
-    /** Debug builds: tries the connection with a made-up key, to see that the service is reached and answers with its key error. */
-    fun debugProbe(providerName: String) {
-        val p = Provider.values().firstOrNull { it.name == providerName } ?: return
-        prefs.edit().putString("provider", p.name).putString("key_${p.name}", "invalid-test-key").apply()
-        test()
-        ui.postDelayed({ prefs.edit().remove("key_${p.name}").apply() }, 20000)
-    }
+    val settings = AiSettings(act, sheet, ui, say, work)
+    fun config() = settings.config()
+    fun showSettings() = settings.show()
+    fun debugProbe(providerName: String) = settings.debugProbe(providerName)
 
     // ---- menu -----------------------------------------------------------------------------------------------------
 
@@ -116,11 +75,7 @@ class AiAssistant(
         ))
     }
 
-    private fun needKey(): AiConfig? {
-        val cfg = config()
-        if (!cfg.ready) { say("Add your API key in AI service settings first"); showSettings(); return null }
-        return cfg
-    }
+    private fun needKey(): AiConfig? = settings.needKey()
 
     // ---- page material --------------------------------------------------------------------------------------------
 
@@ -275,36 +230,13 @@ class AiAssistant(
 
     // ---- showing and placing text ---------------------------------------------------------------------------------
 
-    private fun paginate(text: String, size: Int): List<String> {
-        val pages = ArrayList<String>(); var cur = StringBuilder()
-        for (para in text.split("\n")) {
-            if (cur.length + para.length > size && cur.isNotEmpty()) { pages.add(cur.toString().trim()); cur = StringBuilder() }
-            cur.append(para).append("\n")
-        }
-        if (cur.isNotBlank()) pages.add(cur.toString().trim())
-        return pages.ifEmpty { listOf(text) }
-    }
-
     /** A long answer shown a screen at a time. */
-    fun showText(title: String, text: String, actions: List<Pair<String, () -> Unit>> = emptyList(), page: Int = 0) {
-        val pages = paginate(text, 850)
-        val p = page.coerceIn(0, pages.size - 1)
-        val box = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
-        box.addView(TextView(act).apply { this.text = pages[p]; textSize = 21f; setTextColor(Color.BLACK); setLineSpacing(0f, 1.15f); setPadding(8, 8, 8, 16) })
-        val bar = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
-        if (pages.size > 1) {
-            bar.addView(EButton(act, "left", null) { showText(title, text, actions, p - 1) }.apply { enabledState = p > 0 }, LinearLayout.LayoutParams(140, Eink.BAR_H))
-            bar.addView(act.label("${p + 1} / ${pages.size}", 20f).apply { gravity = android.view.Gravity.CENTER }, LinearLayout.LayoutParams(160, -2))
-            bar.addView(EButton(act, "right", null) { showText(title, text, actions, p + 1) }.apply { enabledState = p < pages.size - 1 }, LinearLayout.LayoutParams(140, Eink.BAR_H))
-        }
-        for ((t, f) in actions) bar.addView(EButton(act, null, t) { sheet.hide(); f() }.apply { textSize = 26f }, LinearLayout.LayoutParams(0, Eink.BAR_H, 1f).apply { leftMargin = 12 })
-        box.addView(bar)
-        sheet.show(title, box)
-    }
+    fun showText(title: String, text: String, actions: List<Pair<String, () -> Unit>> = emptyList(), page: Int = 0) =
+        PagedText.show(act, sheet, title, text, actions, page)
 
     /** Puts text on new pages after the current one (about a page's worth each). */
     private fun placeText(text: String) {
-        val chunks = paginate(text, 1500)
+        val chunks = PagedText.paginate(text, 1500)
         for (c in chunks) { ink.addPageAfterCurrent(); ink.addText(c, 70f, 90f, ink.page.w - 140f) }
         say("Added ${chunks.size} ${if (chunks.size == 1) "page" else "pages"}")
     }

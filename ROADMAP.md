@@ -84,3 +84,14 @@ Source: `clipbrain-ios/research/notability-teardown/REPORT-2-UX.md` (screens, to
 | Zoom shortcut: tap 3 (or 4) times in a row with the pen to zoom in where the pen is, again to zoom out; level 2x/3x/4x; "spot I tap" or "fixed squares"; the tap dots are removed | DONE (tested with simulated taps) |
 | Zoom bar while zoomed: pan arrows, level, Page width, Whole page | DONE |
 | Move along while zoomed: lift the pen near the right edge and the page slides, at the line end it returns left one line down | DONE |
+
+## Ebook reader (user request, 2026-10-14, v0.18)
+| Feature | Status |
+|---|---|
+| Books tab in the library: cards with cover and progress, sort, Reading/Finished, remove; Add books (file picker, several at once) and Find on tablet (lists every ebook file on the tablet to tick and add) | DONE (Find on tablet needs the file permission; untested on the real file tree) |
+| EPUB (contents, cover, links), FB2, TXT (Turkish encodings too), HTML | DONE, tested with a made-up EPUB |
+| Reader: pages jump (volume/page keys, arrows, tap at the page edges), text size/typeface/spacing/margins, contents, find in book, go to %, remembers place, clean refresh every N pages | DONE |
+| Tap a word: offline English + Turkish dictionary (WordNet meanings and examples, WikDict translations, word forms traced back: running -> run, kitabi -> kitap), Save word to the book's word list/flashcards | DONE |
+| Drag over text: highlight (kept, listed, removable), Meaning, Explain and Translate with AI, Copy | DONE |
+| AI in the reader: ask about the chapter, summarize, flashcards from the chapter, explain/translate a passage; same service settings as notebooks | DONE, untested with a real key |
+| PDF books, comics (CBZ), Kindle MOBI | IN PROGRESS |
