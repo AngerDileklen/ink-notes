@@ -115,8 +115,8 @@ class NotesActivity : Activity(), InkView.Host {
         presetIndex = prefs.getInt("preset", 1).coerceIn(0, presets.size - 1)
         polish = prefs.getBoolean("polish", false)
 
-        // Debug builds can open a separate scratch notebook (adb ... --es notebook scratch) so tests never touch real notes.
-        notebookName = (if (debuggableApp) intent?.getStringExtra("notebook") else null)?.filter { it.isLetterOrDigit() || it == '_' }
+        // The library says which notebook to open (adb tests use e.g. --es notebook scratch so real notes stay untouched).
+        notebookName = intent?.getStringExtra("notebook")?.filter { it.isLetterOrDigit() || it == '_' }
             ?.ifEmpty { null } ?: "notebook1"
         file = File(filesDir, "notes/$notebookName.inkn")
         rotateBackups()
@@ -437,7 +437,8 @@ class NotesActivity : Activity(), InkView.Host {
         }
         snapBtn = tb("") { ink.settings.shapeSnap = !ink.settings.shapeSnap; saveToolSettings(); refreshChrome() }
         for (b in listOf(inkModeBtn, polishBtn, snapBtn, paperBtn, sideBtn,
-            tb("Import PDF...") { pickPdf() },
+            tb("Back to library") { save(); finish() },
+            tb("Import PDF into this notebook...") { pickPdf() },
             tb("Delete this page") { confirmDeletePage() },
             tb("Full screen refresh now") { eink.fullRefresh(); hideSettings() },
             tb("Open device test tools (Probe)") { save(); startActivity(Intent(this, ProbeActivity::class.java)) },
@@ -599,6 +600,7 @@ class NotesActivity : Activity(), InkView.Host {
         inFast = false
         eink.restoreNow()
         save()
+        try { Thumbnailer.save(note.pages[0], pdfs, 360, File(file.parentFile, "$notebookName.png")) } catch (_: Throwable) { }
         super.onPause()
     }
 

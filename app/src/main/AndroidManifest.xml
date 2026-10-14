@@ -15,8 +15,9 @@
         android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
+        <!-- The front door: all notebooks. Also receives PDFs sent from a file manager ("Open with", Share). -->
         <activity
-            android:name=".notes.NotesActivity"
+            android:name=".notes.LibraryActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"
             android:exported="true"
             android:launchMode="singleTop"
@@ -25,7 +26,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- "Open with" from a file manager, and Share to this app -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -39,6 +39,12 @@
                 <data android:mimeType="application/pdf" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".notes.NotesActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"
+            android:exported="true"
+            android:label="Ink Notes" />
 
         <!-- Device test tools, opened from Ink Notes > More. -->
         <activity

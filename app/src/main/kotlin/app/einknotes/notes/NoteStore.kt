@@ -72,6 +72,13 @@ object NoteStore {
         }
     }
 
+    /** Changes a notebook's title. */
+    fun rename(file: File, title: String) {
+        val note = load(file)
+        note.title = title
+        save(note, file)
+    }
+
     /** Reads just enough of the file to list it in the library. Never throws; returns null for unreadable files. */
     fun readHeader(file: File): Header? {
         return try {

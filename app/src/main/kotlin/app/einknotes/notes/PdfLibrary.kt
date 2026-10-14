@@ -59,6 +59,32 @@ class PdfLibrary(context: Context) {
     @Synchronized
     fun pageCount(name: String): Int = ensure(name).pageCount
 
+    /** One blank-background notebook page per PDF page, shaped like the PDF page. */
+    fun buildPages(name: String, progress: ((Int, Int) -> Unit)? = null): List<PageData> {
+        val count = pageCount(name)
+        val pages = ArrayList<PageData>(count)
+        for (i in 0 until count) {
+            val (wp, hp) = pageSize(name, i)
+            val pg = PageData(Paper.BLANK)
+            pg.pdfFile = name; pg.pdfPage = i
+            pg.w = PAGE_W; pg.h = PAGE_W * hp / wp.toFloat()
+            pages.add(pg)
+            if (i % 10 == 0) progress?.invoke(i + 1, count)
+        }
+        return pages
+    }
+
+    /** Deletes stored PDFs that no notebook points at any more. */
+    @Synchronized
+    fun collectGarbage(referenced: Set<String>) {
+        for (f in dir.listFiles() ?: return) {
+            if (f.name.endsWith(".pdf") && f.name !in referenced) {
+                if (openName == f.name) close()
+                f.delete()
+            }
+        }
+    }
+
     /** Size of a page in PDF points. */
     @Synchronized
     fun pageSize(name: String, index: Int): Pair<Int, Int> {
