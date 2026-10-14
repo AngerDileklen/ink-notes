@@ -23,6 +23,12 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import app.einknotes.EinkController
 import app.einknotes.ProbeActivity
+import app.einknotes.notes.ai.AiAssistant
+import app.einknotes.notes.ai.StudyPanel
+import app.einknotes.notes.ai.StudySet
+import app.einknotes.notes.ai.Card
+import app.einknotes.notes.ai.Question
+import app.einknotes.notes.ai.QuizKind
 import app.einknotes.notes.ui.EButton
 import app.einknotes.notes.ui.Eink
 import app.einknotes.notes.ui.Notice
@@ -69,6 +75,8 @@ class NotesActivity : Activity(), InkView.Host {
     private var dirty = false
     private var debugReceiver: BroadcastReceiver? = null
     private lateinit var pdfText: PdfTextEngine
+    private lateinit var studyPanel: StudyPanel
+    private lateinit var assistant: AiAssistant
 
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var note: NoteData
@@ -239,6 +247,9 @@ class NotesActivity : Activity(), InkView.Host {
         pagesPanel = PagesPanel(this, note, pdfs, ink, sheet, { hidePages() }, { i -> ink.goToPage(i); hidePages(); refreshChrome() })
         pagesPanel.visibility = View.GONE
         frame.addView(pagesPanel)
+        studyPanel = StudyPanel(this) { hideStudy() }
+        studyPanel.visibility = View.GONE
+        frame.addView(studyPanel)
         importPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE); isClickable = true
             setPadding(60, 400, 60, 60); visibility = View.GONE
@@ -247,7 +258,22 @@ class NotesActivity : Activity(), InkView.Host {
         importPanel.addView(importText)
         frame.addView(importPanel)
         setContentView(frame)
+        assistant = AiAssistant(this, note, notebookName, pdfs, pdfText, ink, sheet, ui, { say(it) }, { setWork(it) },
+            { r, ms -> startPlayback(r, ms) }, { set, quiz -> showStudy(set, quiz) }, { })
     }
+
+    /** Shows (or hides, with null) the full-screen "working" panel and blocks the keys meanwhile. */
+    private fun setWork(text: String?) {
+        if (text == null) { importPanel.visibility = View.GONE; importing = false }
+        else { importing = true; importText.text = text; importPanel.visibility = View.VISIBLE }
+    }
+
+    private fun showStudy(set: StudySet, quiz: Boolean) {
+        studyPanel.visibility = View.VISIBLE
+        if (quiz) studyPanel.startQuiz(set) else studyPanel.startFlashcards(set) { assistant.saveStudy() }
+    }
+
+    private fun hideStudy() { studyPanel.visibility = View.GONE; ink.repaintAll() }
 
     private fun icon(name: String, text: String?, onClick: () -> Unit) =
         EButton(this, name, text) { onClick() }.apply { bordered = false }
@@ -639,7 +665,7 @@ class NotesActivity : Activity(), InkView.Host {
             Row("Play") { startPlayback(r, 0) },
             Row("Delete recording", "Your writing stays") {
                 sheet.confirm("Delete recording ${r.id}?", "The sound is removed; your writing stays.", "Delete") {
-                    AudioNotes.delete(this, note, r); stopPlaybackUi(); dirty = true; save()
+                    AudioNotes.delete(this, note, r); assistant.dropTranscript(r.id); stopPlaybackUi(); dirty = true; save()
                 }
             }
         ))
@@ -800,6 +826,7 @@ class NotesActivity : Activity(), InkView.Host {
             Row("Paper and page size", ink.page.paper.label) { showPaper() },
             Row("Insert image...") { pickImage() },
             Row("Import PDF into this notebook...") { pickPdf() },
+            Row("AI assistant", "Ask, summarize, flashcards and quiz, transcripts") { assistant.showMenu() },
             Row("Find in this notebook", "PDF text and typed text") { askFind() },
             Row("PDF outline", if (ink.page.isPdf) "Chapters of this PDF" else "Open a PDF page first", enabled = ink.page.isPdf) { showOutline() },
             Row("Audio recordings", if (note.recordings.isEmpty()) "None yet" else "${note.recordings.size}") { showRecordings() },
@@ -944,6 +971,7 @@ class NotesActivity : Activity(), InkView.Host {
                 if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 showSettings()
             },
+            Row("AI service", "Provider, API key and model") { assistant.showSettings() },
             Row("Device tools", "Probe, Android About, Developer options") { showDeviceTools() },
             Row("About Ink Notes", "Version ${packageManager.getPackageInfo(packageName, 0).versionName}", enabled = false) { }
         ))
@@ -1029,6 +1057,7 @@ class NotesActivity : Activity(), InkView.Host {
         if (importing && code != KeyEvent.KEYCODE_BACK) return true
         if (code == KeyEvent.KEYCODE_BACK) {
             if (sheet.isShowing) { if (ev.action == KeyEvent.ACTION_UP) sheet.hide(); return true }
+            if (studyPanel.visibility == View.VISIBLE) { if (ev.action == KeyEvent.ACTION_UP) hideStudy(); return true }
             if (pagesPanel.visibility == View.VISIBLE) { if (ev.action == KeyEvent.ACTION_UP) hidePages(); return true }
         }
         val handled = when (code) {
@@ -1151,6 +1180,22 @@ class NotesActivity : Activity(), InkView.Host {
                             }, k * 230L + 70L)
                         }
                     }
+                    "ai_probe" -> assistant.debugProbe(i.getStringExtra("p") ?: "GEMINI")
+                    "ai_menu" -> assistant.showMenu()
+                    "ai_settings" -> assistant.showSettings()
+                    "study_demo" -> {
+                        val st = assistant.study
+                        if (st.cards.isEmpty()) {
+                            st.cards.add(Card("What is NPV?", "The sum of discounted cash flows."))
+                            st.cards.add(Card("What does IRR equal at the discount rate where NPV = 0?", "The internal rate of return."))
+                            st.quiz.add(Question(QuizKind.MULTIPLE_CHOICE, "A project with NPV > 0 should be...", listOf("Accepted", "Rejected", "Delayed", "Ignored"), "Accepted", "Positive NPV adds value."))
+                            st.quiz.add(Question(QuizKind.TRUE_FALSE, "A higher discount rate lowers NPV.", listOf("True", "False"), "True", "Future cash flows are worth less."))
+                            st.quiz.add(Question(QuizKind.FILL_BLANK, "NPV of a fairly priced asset is ____.", emptyList(), "zero", ""))
+                            assistant.saveStudy()
+                        }
+                        showStudy(st, i.getBooleanExtra("quiz", false))
+                    }
+                    "study_close" -> hideStudy()
                     "find" -> runFind(i.getStringExtra("q") ?: "the")
                     "outline" -> showOutline()
                     "paper_sheet" -> showPaper()

@@ -1051,9 +1051,9 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         host.onTextRequested(px, py, existing)
     }
 
-    fun addText(text: String, x: Float, y: Float) {
+    fun addText(text: String, x: Float, y: Float, boxWidth: Float? = null) {
         if (text.isBlank()) return
-        val w = min(760f, page.w - x - 30f).coerceAtLeast(180f)
+        val w = boxWidth ?: min(760f, page.w - x - 30f).coerceAtLeast(180f)
         val item = TextItem(text, x, y, w, settings.textSize, settings.textGray, settings.textBold)
         stamp(item)
         page.items.add(item)

@@ -74,7 +74,7 @@ Source: `clipbrain-ios/research/notability-teardown/REPORT-2-UX.md` (screens, to
 | 4 | Zoom window, cosine smoothing + pressure limiter, Notability widths and pen styles, pencil, eraser priority + auto-deselect, box select + arrange/flip, playback dimming and speeds, 500 ms snap | |
 | 5 | PDF text via pdfium: find with hit highlights, highlight text lines, copy text, outline | DONE except copy text (v0.14: Marker snaps to PDF text lines; More > Find in this notebook (PDF + typed text, hits outlined on the page); More > PDF outline) |
 | 6 | Paper sizes (Letter, A4, A5...), about 20 templates drawn in code with a picker, culling/caching, refresh policy | |
-| 7 | AI with the user's key (OpenRouter, Gemini, OpenAI, Anthropic): summary, flashcards + quiz, audio transcript, ask about this page/PDF | |
+| 7 | AI with the user's key (OpenRouter, Gemini, OpenAI, Anthropic): summary, flashcards + quiz, audio transcript, ask about this page/PDF | DONE, untested with a real key (v0.15: More > AI assistant, Settings > AI service; request paths checked with made-up keys; parsing, study scheduling unit tested; study screen tested on the tablet) |
 
 ## Paper and zoom (user request, 2026-10-14, v0.13)
 | Feature | Status |

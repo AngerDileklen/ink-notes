@@ -40,6 +40,7 @@ object NotebookBundle {
             for (n in pdfs) addFile("pdf/$n", File(notes, "pdfs/$n"))
             for (n in images) addFile("img/$n", File(notes, "images/$n"))
             for (r in note.recordings) addFile("audio/${r.file}", File(notes, "audio/${r.file}"))
+            addFile("study.json", File(noteFile.parentFile, noteFile.name.removeSuffix(".inkn") + ".study.json"))
         }
         try { return publish(ctx, note.title, tmp) } finally { tmp.delete() }
     }
@@ -84,6 +85,7 @@ object NotebookBundle {
                         "pdf" -> File(notes, "pdfs/$leaf")
                         "img" -> File(notes, "images/$leaf")
                         "audio" -> File(notes, "audio/$leaf")
+                        "study.json" -> File(stage, "study.json")
                         else -> continue
                     }
                     if (kind != "notebook.inkn" && target.exists()) continue   // content-named files are identical
@@ -95,6 +97,7 @@ object NotebookBundle {
             val inkn = File(stage, "notebook.inkn")
             if (NoteStore.readHeader(inkn) == null) throw java.io.IOException("The notebook inside is damaged")
             inkn.copyTo(File(notes, "$newId.inkn"), overwrite = false)
+            File(stage, "study.json").takeIf { it.exists() }?.copyTo(File(notes, "$newId.study.json"), overwrite = false)
             return newId
         } finally { stage.deleteRecursively() }
     }

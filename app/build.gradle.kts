@@ -12,8 +12,8 @@ android {
         minSdk = 28
         // The tablet runs Android 11. Targeting 29 keeps simple file access for the probe's report.
         targetSdk = 29
-        versionCode = 19
-        versionName = "0.14.0-pdf-text"
+        versionCode = 20
+        versionName = "0.15.0-ai"
     }
 
     buildTypes {
@@ -35,4 +35,5 @@ dependencies {
     // PDF text (search, selection, highlight along text lines). Drawing stays on Android's PdfRenderer.
     implementation("io.legere:pdfiumandroid:1.0.32")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
