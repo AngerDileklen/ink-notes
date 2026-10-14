@@ -221,12 +221,16 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     }
 
     /** Deletes the current page (a lone page is replaced by an empty one). Its undo history goes with it. */
-    fun deleteCurrentPage() {
+    fun deleteCurrentPage() = deletePageAt(pageIndex)
+
+    fun deletePageAt(i: Int) {
+        if (i !in note.pages.indices) return
         clearSelection()
-        val removed = page
+        val removed = note.pages[i]
         if (note.pages.size == 1) note.pages[0] = PageData()
         else {
-            note.pages.removeAt(pageIndex)
+            note.pages.removeAt(i)
+            if (i < pageIndex) pageIndex -= 1
             if (pageIndex >= note.pages.size) pageIndex = note.pages.size - 1
         }
         undoStack.removeAll { it.page === removed }
@@ -234,6 +238,36 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         fitToView(keepZoom = false)
         transformChanged()
         rebuild()
+        host.onDocumentChanged()
+    }
+
+    /** Moves page [from] so that it ends up at position [to]. The page you are looking at stays in view. */
+    fun movePage(from: Int, to: Int) {
+        if (from !in note.pages.indices || to !in note.pages.indices || from == to) return
+        val current = page
+        val p = note.pages.removeAt(from)
+        note.pages.add(to, p)
+        pageIndex = note.pages.indexOf(current)
+        host.onDocumentChanged()
+    }
+
+    /** A full copy of page [i] (background and everything on it), placed right after it. */
+    fun duplicatePage(i: Int) {
+        if (i !in note.pages.indices) return
+        val src = note.pages[i]
+        val copy = PageData(src.paper)
+        copy.w = src.w; copy.h = src.h; copy.pdfFile = src.pdfFile; copy.pdfPage = src.pdfPage
+        for (item in src.items) copy.items.add(item.copy())
+        note.pages.add(i + 1, copy)
+        if (i < pageIndex) pageIndex += 1
+        host.onDocumentChanged()
+    }
+
+    /** An empty page right after page [i]. */
+    fun insertBlankAfter(i: Int) {
+        if (i !in note.pages.indices) return
+        note.pages.add(i + 1, PageData(if (note.pages[i].isPdf) Paper.BLANK else note.pages[i].paper))
+        if (i < pageIndex) pageIndex += 1
         host.onDocumentChanged()
     }
 

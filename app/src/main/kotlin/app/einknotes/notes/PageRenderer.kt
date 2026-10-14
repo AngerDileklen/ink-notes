@@ -20,7 +20,7 @@ import kotlin.math.sqrt
  * Draws pages. Used by the on-screen view, by thumbnails and by PDF export, so a page looks identical everywhere.
  * All draw calls take a transform: view = page * scale + (tx, ty).
  */
-class PageRenderer {
+class PageRenderer(private val forExport: Boolean = false) {
 
     private val linePaint = Paint().apply { color = Color.rgb(190, 190, 190); strokeWidth = 1.5f; isAntiAlias = false }
     private val borderPaint = Paint().apply { color = Color.rgb(120, 120, 120); style = Paint.Style.STROKE; strokeWidth = 2f }
@@ -38,6 +38,10 @@ class PageRenderer {
         strokeJoin = Paint.Join.ROUND
         // Multiply keeps black text black underneath a grey highlight, and a single path never darkens itself.
         xfermode = PorterDuffXfermode(PorterDuff.Mode.MULTIPLY)
+    }
+
+    private val exportHighlighterPaint = Paint().apply {
+        isAntiAlias = true; style = Paint.Style.STROKE; strokeJoin = Paint.Join.ROUND
     }
 
     // ---- paper -------------------------------------------------------------------------------
@@ -70,6 +74,7 @@ class PageRenderer {
     }
 
     fun drawBorder(c: Canvas, page: PageData, scale: Float, tx: Float, ty: Float) {
+        if (forExport) return
         c.drawRect(tx, ty, tx + page.w * scale, ty + page.h * scale, borderPaint)
     }
 
@@ -142,6 +147,13 @@ class PageRenderer {
     }
 
     fun drawHighlighter(c: Canvas, path: Path, gray: Int, widthPx: Float, dot: Boolean) {
+        if (forExport) {
+            exportHighlighterPaint.color = Color.argb(255 - gray, 0, 0, 0)
+            exportHighlighterPaint.strokeWidth = max(widthPx, 2f)
+            exportHighlighterPaint.strokeCap = if (dot) Paint.Cap.ROUND else Paint.Cap.SQUARE
+            c.drawPath(path, exportHighlighterPaint)
+            return
+        }
         highlighterPaint.color = Color.rgb(gray, gray, gray)
         highlighterPaint.strokeWidth = max(widthPx, 2f)
         highlighterPaint.strokeCap = if (dot) Paint.Cap.ROUND else Paint.Cap.SQUARE

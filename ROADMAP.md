@@ -17,8 +17,8 @@ Status: DONE / NEXT / LATER / SKIP (with reason)
 | Pencil (grain) | Fixed grey texture only; real grain ghosts on e-ink | LATER |
 | Ink colours / brush packs (glitter, rainbow) | Greys only; colour brushes need a colour panel | SKIP |
 | Partial eraser (split strokes) | Segment subtraction | LATER |
-| Shape recognition (hold to snap) | Own multi-fitter detector from the teardown (line, ellipse, polygon, arrow, curve) | NEXT |
-| Shape tool + editable shapes | Shape items with handles | NEXT |
+| Shape recognition (hold to snap) | Own multi-fitter detector (line, arrow, ellipse/circle, rectangle/square, triangle, polygon); snap is a proposal, moving the pen cancels it | DONE |
+| Shape tool + editable shapes | Drag out line, arrow, rectangle, ellipse, triangle; shapes select, move and resize like any item | DONE |
 | Ruler / straight edge | Edge overlay | LATER |
 | Stroke stabilization setting | Per-tool smoothing strength | LATER |
 
@@ -36,11 +36,11 @@ Status: DONE / NEXT / LATER / SKIP (with reason)
 | Feature | Plan | Status |
 |---|---|---|
 | PDF import | PdfRenderer, per-page backgrounds | DONE |
-| PDF export with ink | Flatten pages + strokes into a new PDF | NEXT |
+| PDF export with ink | New PDF: original page as a 150 dpi picture, ink as vector | DONE |
 | Paper templates (blank, ruled, grid, dots) | Drawn in code | DONE |
 | More templates (Cornell, planner, music staff...) | Drawn in code | LATER |
-| Page manager (thumbnails, reorder, delete, duplicate) | Thumbnail grid | NEXT |
-| Library of notebooks, subjects/folders | Home screen, list + thumbnails | NEXT |
+| Page manager (thumbnails, reorder, delete, duplicate, blank page) | Thumbnail grid, tap the page counter | DONE |
+| Library of notebooks | Home screen: thumbnails, new, rename, delete, PDF into its own notebook | DONE (folders LATER) |
 | Bookmarks, outline, jump to page | Page list | LATER |
 | Backup / restore / share | Export a notebook bundle | LATER |
 | Cloud sync, account, subscriptions | Not wanted | SKIP |

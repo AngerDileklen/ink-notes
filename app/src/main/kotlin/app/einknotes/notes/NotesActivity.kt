@@ -61,6 +61,7 @@ class NotesActivity : Activity(), InkView.Host {
     private lateinit var redoBtn: Button
     private lateinit var pageLabel: Button
     private lateinit var settingsPanel: LinearLayout
+    private lateinit var pagesPanel: PagesPanel
     private lateinit var inkModeBtn: Button
     private lateinit var polishBtn: Button
     private lateinit var paperBtn: Button
@@ -138,7 +139,7 @@ class NotesActivity : Activity(), InkView.Host {
         redoBtn = tb("Redo") { ink.redo() }
         row1.addView(undoBtn, weight()); row1.addView(redoBtn, weight())
         val row2 = row()
-        pageLabel = tb("1/1") { }
+        pageLabel = tb("1/1") { showPages() }
         for (b in listOf(tb("<") { goPage(-1) }, pageLabel, tb(">") { goPage(1) }, tb("+ Page") { ink.addPageAfterCurrent() },
             tb("Zoom -") { ink.zoomBy(-1) }, tb("Zoom +") { ink.zoomBy(1) },
             tb("Refresh") { eink.fullRefresh() }, tb("More") { showSettings() })) row2.addView(b, weight())
@@ -157,6 +158,9 @@ class NotesActivity : Activity(), InkView.Host {
         frame.addView(root)
         settingsPanel = buildSettings().also { it.visibility = View.GONE }
         frame.addView(settingsPanel)
+        pagesPanel = PagesPanel(this, note, pdfs, ink, { hidePages() }, { i -> ink.goToPage(i); hidePages(); refreshChrome() })
+        pagesPanel.visibility = View.GONE
+        frame.addView(pagesPanel)
         importPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.WHITE)
@@ -403,6 +407,32 @@ class NotesActivity : Activity(), InkView.Host {
         }
     }
 
+    /** Writes the whole notebook (backgrounds + ink) to Downloads/Ink Notes as a PDF. */
+    private fun exportPdf() {
+        if (importing) return
+        importing = true
+        hideSettings()
+        save()
+        importText.text = "Exporting PDF..."
+        importPanel.visibility = View.VISIBLE
+        thread(name = "pdf-export") {
+            try {
+                val r = PdfExporter.export(this, note, pdfs) { i, n -> ui.post { importText.text = "Exporting PDF...\n\npage $i of $n" } }
+                ui.post {
+                    importPanel.visibility = View.GONE; importing = false
+                    val mb = r.bytes / 1048576.0
+                    Toast.makeText(this, "Saved ${r.pages} pages to Download/Ink Notes/${r.name} (${"%.1f".format(mb)} MB)", Toast.LENGTH_LONG).show()
+                    if (debuggableApp) Log.d("InkDebug", "exported ${r.uri} ${r.pages} pages ${r.bytes} bytes name=${r.name}")
+                }
+            } catch (e: Throwable) {
+                ui.post {
+                    importPanel.visibility = View.GONE; importing = false
+                    Toast.makeText(this, "Could not export: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
     private fun confirmDeletePage() {
         AlertDialog.Builder(this)
             .setMessage("Delete page ${ink.pageIndex + 1} of ${note.pages.size}? Its writing goes with it.")
@@ -440,6 +470,7 @@ class NotesActivity : Activity(), InkView.Host {
             tb("Back to library") { save(); finish() },
             tb("Import PDF into this notebook...") { pickPdf() },
             tb("Delete this page") { confirmDeletePage() },
+            tb("Export notebook as PDF") { exportPdf() },
             tb("Full screen refresh now") { eink.fullRefresh(); hideSettings() },
             tb("Open device test tools (Probe)") { save(); startActivity(Intent(this, ProbeActivity::class.java)) },
             tb("Android 'About' screen (tap Build number 7 times)") { openAbout() },
@@ -470,6 +501,9 @@ class NotesActivity : Activity(), InkView.Host {
     }
 
     private fun hideSettings() { settingsPanel.visibility = View.GONE; ink.repaintAll() }
+
+    private fun showPages() { pagesPanel.show(); pagesPanel.visibility = View.VISIBLE }
+    private fun hidePages() { pagesPanel.visibility = View.GONE; refreshChrome(); ink.repaintAll() }
 
     /** Starts the first of these screens that exists on this firmware. */
     private fun startFirst(vararg intents: Intent): Boolean {
@@ -533,6 +567,10 @@ class NotesActivity : Activity(), InkView.Host {
         val code = ev.keyCode
         if (settingsPanel.visibility == View.VISIBLE && code == KeyEvent.KEYCODE_BACK) {
             if (ev.action == KeyEvent.ACTION_UP) hideSettings()
+            return true
+        }
+        if (pagesPanel.visibility == View.VISIBLE && code == KeyEvent.KEYCODE_BACK) {
+            if (ev.action == KeyEvent.ACTION_UP) hidePages()
             return true
         }
         val handled = when (code) {
@@ -645,6 +683,9 @@ class NotesActivity : Activity(), InkView.Host {
                     "clear_sel" -> ink.clearSelection()
                     "import_path" -> i.getStringExtra("path")?.let { importPdf(Uri.fromFile(File(it))) }
                     "delete_page" -> { ink.deleteCurrentPage(); refreshChrome() }
+                    "export_pdf" -> exportPdf()
+                    "pages_open" -> showPages()
+                    "pages_close" -> hidePages()
                     "goto" -> { ink.goToPage(i.getIntExtra("v", 1) - 1); refreshChrome() }
                     "restore_backup" -> {
                         val b = NoteStore.load(File(filesDir, "notes/notebook1.v2-backup.inkn"))
