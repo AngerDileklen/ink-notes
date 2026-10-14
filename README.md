@@ -9,6 +9,7 @@ Plain Android Views, no animation, built for slow-refresh panels. The device tes
 - **Paper button** (top bar): blank, ruled, squares, dots, narrow, college, Cornell, handwriting practice, music, two/three columns, daily/weekly/monthly planners, engineering, hexagonal and isometric; spacing in mm; page size A4 / Letter / Legal / tablet. New pages are A4.
 - **Tools:** pen (pressure) and calligraphy, marker (snaps to the text of PDF pages), eraser (whole or partial), lasso, shapes (hold the pen still to snap a drawn shape), text, tape, ruler, hand. Width and grey quick picks sit beside the active tool; long-press one to change it.
 - **PDF:** import into a notebook, find text, outline, export with ink. **Audio:** record while writing; strokes link to the sound. **AI** (your own key in Settings > AI service): ask about a page, summaries, flashcards and quiz, transcripts.
+- **Books tab:** read EPUB, PDF, FB2, TXT, HTML, CBZ comics and older Kindle (MOBI) files. Add books from the file picker or let the app list every ebook on the tablet. Tap a word for the offline English/Turkish dictionary, drag to highlight, AI for questions, summaries, translation and flashcards.
 - **Library:** cards, folders, favorites, recent, Recently deleted (30 days), backup/restore as `.inkz`.
 
 ## Building
@@ -24,5 +25,7 @@ Debug builds accept commands over USB for testing, e.g.
 `adb shell "am broadcast -a app.einknotes.DEBUG --es cmd tap_seq --ef x 500 --ef y 700 --ei n 3"`
 (see `registerDebugControl` in `NotesActivity.kt`; the library has its own receiver, `app.einknotes.LIBRARY`).
 Test only in a notebook called `scratch` (`am start -n app.einknotes/.notes.NotesActivity --es notebook scratch`).
+
+The offline dictionary is built from free data sets (Princeton WordNet 3.0 and WikDict) with `python3 scripts/build_dict.py <folder>` into `app/src/main/assets/dict.db` (not kept in git; see the script header for the sources and licences).
 
 `ROADMAP.md` lists what is done and what is next.

@@ -290,11 +290,27 @@ class BooksActivity : Activity() {
     private fun menu(b: Book) {
         sheet.list(b.title.take(40), listOf(
             Row("Open") { open(b.id) },
+            Row("Annotate in a notebook", "Makes a notebook from this PDF so you can write on its pages", enabled = b.format == "pdf") { annotate(b) },
             Row("Rename") { sheet.input("Title", b.title) { t -> if (t.isNotBlank()) { b.title = t.trim(); BookStore.save(this, b); refresh() } } },
             Row("Remove from the library", "Deletes this copy of the book and its highlights; the original file stays where it is") {
                 sheet.confirm("Remove this book?", "\"${b.title}\", its highlights and saved words will be removed from the app.", "Remove") { BookStore.remove(this, b.id); refresh() }
             }
         ))
+    }
+
+    /** A PDF book becomes a notebook (pen, highlighter, text...) in the Notebooks tab. */
+    private fun annotate(b: Book) {
+        val name = b.file ?: return
+        busy = true; busyPanel.visibility = View.VISIBLE; busyText.text = "Making a notebook from \"${b.title}\"..."
+        thread(name = "book-annotate") {
+            try {
+                val pages = app.einknotes.notes.PdfLibrary(this).buildPages(name)
+                val note = app.einknotes.notes.NoteData(b.title)
+                note.pages.clear(); note.pages.addAll(pages)
+                app.einknotes.notes.NoteStore.save(note, File(filesDir, "notes/nb_${System.currentTimeMillis()}.inkn"))
+                ui.post { busy = false; busyPanel.visibility = View.GONE; notice.show("Made a notebook \"${b.title}\". Open the Notebooks tab to write on it.", 6000) }
+            } catch (e: Throwable) { ui.post { busy = false; busyPanel.visibility = View.GONE; notice.show("Could not make a notebook: ${e.message}") } }
+        }
     }
 
     // ---- adding books ---------------------------------------------------------------------------------------------------------------

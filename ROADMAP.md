@@ -94,4 +94,4 @@ Source: `clipbrain-ios/research/notability-teardown/REPORT-2-UX.md` (screens, to
 | Tap a word: offline English + Turkish dictionary (WordNet meanings and examples, WikDict translations, word forms traced back: running -> run, kitabi -> kitap), Save word to the book's word list/flashcards | DONE |
 | Drag over text: highlight (kept, listed, removable), Meaning, Explain and Translate with AI, Copy | DONE |
 | AI in the reader: ask about the chapter, summarize, flashcards from the chapter, explain/translate a passage; same service settings as notebooks | DONE, untested with a real key |
-| PDF books, comics (CBZ), Kindle MOBI | IN PROGRESS |
+| PDF books (word lookup and highlights from the PDF's text layer, find, contents, annotate in a notebook), comics (CBZ), old Kindle MOBI/PRC (DRM-free; KF8/.azw3 and protected files are refused with a hint to convert to EPUB) | DONE, tested with made-up files |

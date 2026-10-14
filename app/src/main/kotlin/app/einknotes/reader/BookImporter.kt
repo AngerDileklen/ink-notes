@@ -66,6 +66,7 @@ object BookImporter {
             return book
         } catch (e: Throwable) {
             dir.deleteRecursively()
+            if (e !is ImportException) android.util.Log.w("Books", "import failed", e)
             throw if (e is ImportException) e else ImportException("Could not read this book: ${e.message}")
         }
     }
@@ -390,7 +391,20 @@ object BookImporter {
         val pdfs = app.einknotes.notes.PdfLibrary(ctx)
         val stored = pdfs.importFrom(ctx, Uri.fromFile(file))
         val count = pdfs.pageCount(stored)
-        return Book(id, baseName, "", "pdf", "", System.currentTimeMillis(), emptyList(), emptyList(), null, stored, count)
+        // cover: the first page
+        var cover: String? = null
+        try {
+            val (wp, hp) = pdfs.pageSize(stored, 0)
+            val w = 360; val h = (w * hp / maxOf(1, wp).toFloat()).toInt().coerceAtLeast(1)
+            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            if (pdfs.render(stored, 0, bmp, app.einknotes.notes.PAGE_W, w / app.einknotes.notes.PAGE_W, 0f, 0f)) {
+                val content = BookStore.content(ctx, id); content.mkdirs()
+                File(content, "cover.png").outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, it) }
+                cover = "cover.png"
+            }
+            bmp.recycle()
+        } catch (_: Throwable) { }
+        return Book(id, baseName, "", "pdf", "", System.currentTimeMillis(), emptyList(), emptyList(), cover, stored, count)
     }
 
     private fun importCbz(ctx: Context, id: String, file: File, baseName: String): Book {

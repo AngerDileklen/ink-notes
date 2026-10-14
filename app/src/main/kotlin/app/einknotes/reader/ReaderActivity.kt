@@ -59,6 +59,9 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
     private lateinit var eink: EinkController
     private var backend: ReaderBackend? = null
     private var html: HtmlBookView? = null
+    private var pdf: PdfBookView? = null
+    private var pdfs: app.einknotes.notes.PdfLibrary? = null
+    private var pdfText: app.einknotes.notes.PdfTextEngine? = null
     private lateinit var dictionary: Dictionary
     private lateinit var aiSettings: AiSettings
     private lateinit var ai: ReaderAi
@@ -134,7 +137,10 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
         notice = Notice(frame)
         aiSettings = AiSettings(this, sheet, ui, { say(it) }, { setWork(it) })
         ai = ReaderAi(this, book, aiSettings, sheet, ui, { say(it) }, { setWork(it) },
-            { cb -> html?.chapterText(cb) ?: cb("") }, { backend?.chapterTitle() ?: "" }, { study }, { saveStudy() }, { quiz -> showStudy(quiz) })
+            { cb ->
+                val p = pdf
+                if (p != null) thread(name = "pdf-ai-text") { val t = p.pageTextForAi(); ui.post { cb(t) } } else html?.chapterText(cb) ?: cb("")
+            }, { backend?.chapterTitle()?.ifEmpty { null } ?: (if (book.format == "pdf") "page ${(pdf?.page ?: 0) + 1}" else "") }, { study }, { saveStudy() }, { quiz -> showStudy(quiz) })
     }
 
     private fun say(text: String) { if (::notice.isInitialized) notice.show(text) }
@@ -170,6 +176,20 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
                 pageArea.addView(v, 0, FrameLayout.LayoutParams(-1, -1))
                 v.open(state.chapter.coerceIn(0, book.spine.size - 1), state.fraction)
             }
+            "pdf" -> {
+                val lib = app.einknotes.notes.PdfLibrary(this); val engine = app.einknotes.notes.PdfTextEngine(this, lib)
+                pdfs = lib; pdfText = engine
+                val v = PdfBookView(this, book, lib, engine, pdfHost)
+                pdf = v; backend = v
+                pageArea.addView(v, 0, FrameLayout.LayoutParams(-1, -1))
+                v.post { v.open(state.page, state.scroll) }
+            }
+            "cbz" -> {
+                val v = ComicBookView(this, book, BookStore.content(this, book.id), { onPosition() }, { })
+                backend = v
+                pageArea.addView(v, 0, FrameLayout.LayoutParams(-1, -1))
+                v.post { v.open(state.page) }
+            }
             else -> { say("This kind of book is not supported yet"); finish() }
         }
         refreshChrome()
@@ -202,6 +222,14 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
 
     override fun highlightsFor(chapter: Int) = state.highlights.filter { it.chapter == chapter }
 
+    private val pdfHost = object : PdfBookView.Host {
+        override fun onWord(word: String, sentence: String, start: Int, end: Int, highlightId: String) = this@ReaderActivity.onWord(word, sentence, start, end, highlightId)
+        override fun onSelection(text: String, start: Int, end: Int) = this@ReaderActivity.onSelection(text, start, end)
+        override fun onBlankTap() = this@ReaderActivity.onBlankTap()
+        override fun onPosition() = this@ReaderActivity.onPosition()
+        override fun highlightsOnPage(page: Int) = state.highlights.filter { it.page == page }
+    }
+
     override fun onBlankTap() { hideContext(); sheet.hide() }
 
     override fun onWord(word: String, sentence: String, start: Int, end: Int, highlightId: String) {
@@ -222,7 +250,7 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
         contextBar.visibility = View.VISIBLE
     }
 
-    private fun hideContext() { contextBar.visibility = View.GONE; html?.clearSelection() }
+    private fun hideContext() { contextBar.visibility = View.GONE; html?.clearSelection(); pdf?.clearSelection() }
 
     private fun copy(text: String) {
         (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("book", text))
@@ -232,6 +260,10 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
     // ---- highlights -------------------------------------------------------------------------------------------------------------
 
     private fun addHighlight(text: String, start: Int, end: Int) {
+        pdf?.let { p ->
+            state.highlights.add(Highlight(0, start, end, text.take(300), System.currentTimeMillis(), p.page))
+            p.invalidate(); savePositionNow(); return
+        }
         val v = html ?: return
         val h = Highlight(v.chapter, start, end, text.take(300), System.currentTimeMillis())
         state.highlights.add(h)
@@ -241,7 +273,7 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
 
     private fun removeHighlight(id: String) {
         state.highlights.removeAll { it.time.toString() == id }
-        html?.removeHighlight(id)
+        html?.removeHighlight(id); pdf?.invalidate()
         savePositionNow()
     }
 
@@ -249,11 +281,11 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
         if (state.highlights.isEmpty()) { say("No highlights yet. Drag the pen over some text and choose Highlight."); return }
         val sorted = state.highlights.sortedWith(compareBy({ it.chapter }, { it.start }))
         sheet.list("Highlights (${sorted.size})", sorted.map { h ->
-            val ch = book.toc.lastOrNull { it.href.substringBefore('#') == book.spine.getOrNull(h.chapter) }?.title ?: "Section ${h.chapter + 1}"
+            val ch = if (book.format == "pdf") "Page ${h.page + 1}" else book.toc.lastOrNull { it.href.substringBefore('#') == book.spine.getOrNull(h.chapter) }?.title ?: "Section ${h.chapter + 1}"
             Row(h.text.take(110), ch) {
                 sheet.list("Highlight", listOf(
-                    Row("Go there") { html?.openAtOffset(h.chapter, h.start) },
-                    Row("Delete this highlight") { if (h.chapter == html?.chapter) removeHighlight(h.time.toString()) else { state.highlights.remove(h); savePositionNow() } },
+                    Row("Go there") { if (pdf != null) pdf?.goToPage(h.page) else html?.openAtOffset(h.chapter, h.start) },
+                    Row("Delete this highlight") { if (pdf != null || h.chapter == html?.chapter) removeHighlight(h.time.toString()) else { state.highlights.remove(h); savePositionNow() } },
                     Row("Copy the text") { copy(h.text) }))
             }
         })
@@ -327,6 +359,17 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
     private fun showAi() = ai.showMenu(selText.takeIf { contextBar.visibility == View.VISIBLE })
 
     private fun showContents() {
+        pdf?.let { p ->
+            val engine = pdfText ?: return
+            thread(name = "pdf-outline") {
+                val entries = engine.outline(book.file!!)
+                ui.post {
+                    if (entries.isEmpty()) say("This PDF has no contents list. Use Go to a place in the book.")
+                    else sheet.list("Contents", entries.map { e -> Row("    ".repeat(e.level.coerceAtMost(3)) + e.title.ifBlank { "(untitled)" }, "page ${e.pdfPage + 1}") { p.goToPage(e.pdfPage) } })
+                }
+            }
+            return
+        }
         val v = html ?: return
         val entries = book.toc.filter { book.spine.contains(it.href.substringBefore('#')) }
         sheet.list("Contents", entries.map { e -> Row("    ".repeat(e.level.coerceAtMost(3)) + e.title.ifBlank { "(untitled)" }) { v.openHref(e.href) } })
@@ -362,6 +405,7 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
     private fun askPercent() {
         sheet.input("Go to a place in the book", "", hint = "0 - 100 (percent)", ok = "Go") { t ->
             val p = t.trim().toFloatOrNull() ?: return@input
+            pdf?.let { pv -> pv.goToPage((p / 100f * book.pageCount).toInt()); return@input }
             val v = html ?: return@input
             val f = (p / 100f).coerceIn(0f, 1f)
             val sizes = book.spineSizes
@@ -374,6 +418,12 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
     }
 
     private fun showTextSettings() {
+        pdf?.let { p ->
+            sheet.list("Page size", listOf(
+                Row("Fill the screen width", "Larger text, moves down the page", selected = p.zoom >= 1f) { p.zoom = 1f; p.applyZoom() },
+                Row("Whole page", "Smaller, the page fits the screen", selected = p.zoom < 1f) { p.zoom = p.wholePageZoom(); p.applyZoom() }))
+            return
+        }
         val v = html ?: return
         val sizes = listOf(13, 14, 15, 16, 17, 18, 20, 22, 24, 27, 30)
         fun apply() { prefs.edit().putInt("font", v.fontPx).putString("family", v.family).putFloat("lineHeight", v.lineHeight).putInt("margin", v.marginPx).apply(); v.relayout() }
@@ -397,7 +447,28 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
 
     private class Hit(val chapter: Int, val ordinal: Int, val snippet: String)
 
+    private fun runPdfFind(p: PdfBookView, engine: app.einknotes.notes.PdfTextEngine, query: String) {
+        lastQuery = query
+        setWork("Reading the text of the PDF...")
+        thread(name = "pdf-find") {
+            val file = book.file!!
+            val pages = engine.ensureIndex(file) { i, n -> ui.post { workText.text = "Reading the text of the PDF...\n\npage $i of $n" } }
+            val hits = engine.search(file, pages, query)
+            ui.post {
+                setWork(null)
+                if (hits.isEmpty()) { say("Nothing found for \"$query\""); return@post }
+                sheet.list("\"$query\": ${hits.size} pages", hits.map { h ->
+                    Row("Page ${h.pdfPage + 1}", h.snippet) {
+                        p.goToPage(h.pdfPage)
+                        thread(name = "pdf-hits") { val rects = engine.hitRects(file, h.pdfPage, query); ui.post { p.showHits(rects) } }
+                    }
+                })
+            }
+        }
+    }
+
     private fun runFind(query: String) {
+        pdf?.let { p -> pdfText?.let { runPdfFind(p, it, query) }; return }
         lastQuery = query
         setWork("Searching the book...")
         thread(name = "reader-find") {
@@ -483,6 +554,7 @@ class ReaderActivity : Activity(), HtmlBookView.Host {
 
     override fun onDestroy() {
         try { backend?.destroy() } catch (_: Throwable) { }
+        try { pdfText?.close() } catch (_: Throwable) { }
         super.onDestroy()
     }
 }
