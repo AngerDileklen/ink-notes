@@ -63,3 +63,15 @@ Status: DONE / NEXT / LATER / SKIP (with reason)
 | Pen side button | Tool type 6 -> configurable tool | DONE |
 | Zoom window (write in a magnified strip) | Strip view with auto-advance | LATER |
 | Lock screen / sleep behaviour | Respect Hanvon power handling | LATER |
+
+## Rework from Notability round 2 (2026-10-14)
+Source: `clipbrain-ios/research/notability-teardown/REPORT-2-UX.md` (screens, tool numbers, templates, gap list).
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Data safety: never save over an unreadable notebook, synced atomic save, side-effect-free library reads, single editor per notebook, receivers/handlers cleaned up | NEXT |
+| 2 | E-ink UI kit: icon toolbar with width/grey wells, context bar, flat sheets instead of dialogs, paged Settings, library (favorites, recent, sort, Recently Deleted) | |
+| 3 | Long column of pages that jumps a screen at a time; page X of N; Pointer tool | |
+| 4 | Zoom window, cosine smoothing + pressure limiter, Notability widths and pen styles, pencil, eraser priority + auto-deselect, box select + arrange/flip, playback dimming and speeds, 500 ms snap | |
+| 5 | PDF text via pdfium: find with hit highlights, highlight text lines, copy text, outline | |
+| 6 | Paper sizes (Letter, A4, A5...), about 20 templates drawn in code with a picker, culling/caching, refresh policy | |
+| 7 | AI with the user's key (OpenRouter, Gemini, OpenAI, Anthropic): summary, flashcards + quiz, audio transcript, ask about this page/PDF | |
