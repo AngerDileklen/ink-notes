@@ -57,6 +57,8 @@ class ToolSettings {
     var autoAdvance = true
     /** The highlighter snaps to the text lines of a PDF page. */
     var textSnap = true
+    /** The pen draws one constant width instead of following pressure. */
+    var penFixed = false
     /** After erasing, switch back to the tool used before the eraser. */
     var autoDeselectEraser = false
 }
@@ -738,7 +740,8 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         val dragged = if (selMode == SelMode.MOVE || selMode == SelMode.SCALE) selection else null
         val future = futureItems()
         val hide = if (future == null) dragged else if (dragged == null) future else future + dragged
-        renderer.drawItems(c, page, scale, tx, ty, hide)
+        val visible = RectF(-tx / scale - 8f, -ty / scale - 8f, (width - tx) / scale + 8f, (height - ty) / scale + 8f)
+        renderer.drawItems(c, page, scale, tx, ty, hide, visible)
         if (future != null && !replayHide && future.isNotEmpty()) {
             // not yet reached in the recording: drawn pale
             val set = future.toSet()
@@ -977,7 +980,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     private fun beginStroke(active: Tool, x: Float, y: Float, rawPressure: Float) {
         val c = bmpCanvas ?: return
-        brush = when (active) { Tool.HIGHLIGHTER -> Brush.HIGHLIGHTER; Tool.CALLIGRAPHY -> Brush.CALLIGRAPHY; else -> Brush.PEN }
+        brush = when (active) { Tool.HIGHLIGHTER -> Brush.HIGHLIGHTER; Tool.CALLIGRAPHY -> Brush.CALLIGRAPHY; else -> if (settings.penFixed) Brush.FIXED else Brush.PEN }
         liveXs.clear(); liveYs.clear(); livePs.clear()
         writing = true
         strokeMs = recNow(); smX = x; smY = y

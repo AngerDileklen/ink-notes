@@ -237,9 +237,13 @@ class PageRenderer(private val forExport: Boolean = false) {
     // ---- items -------------------------------------------------------------------------------
 
     /** Draws every item of the page in order, skipping those in [skip] (used while items are being dragged). */
-    fun drawItems(c: Canvas, page: PageData, scale: Float, tx: Float, ty: Float, skip: Collection<Item>? = null) {
+    fun drawItems(c: Canvas, page: PageData, scale: Float, tx: Float, ty: Float, skip: Collection<Item>? = null, view: RectF? = null) {
+        // items do not override equals, so a hash set compares them by identity
+        val skipSet = if (skip == null || skip.isEmpty()) null else HashSet(skip)
         for (item in page.items) {
-            if (skip != null && skip.any { it === item }) continue
+            if (skipSet != null && item in skipSet) continue
+            // items entirely outside the part of the page on screen are not drawn
+            if (view != null && !item.intersects(view.left, view.top, view.right, view.bottom)) continue
             drawItem(c, item, scale, tx, ty)
         }
     }
@@ -370,6 +374,7 @@ class PageRenderer(private val forExport: Boolean = false) {
 
         private fun widthFor(pressure: Float): Float = when (brush) {
             Brush.CALLIGRAPHY -> (1.6f + 4.4f * pressure.coerceIn(0f, 1f).pow(0.8f)) * widthScale * scale
+            Brush.FIXED -> 3.6f * widthScale * scale
             else -> penWidthFor(pressure) * widthScale * scale
         }
 

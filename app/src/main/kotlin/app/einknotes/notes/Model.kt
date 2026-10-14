@@ -19,7 +19,8 @@ const val PAGE_H = 1985.6f
 enum class Tool { PEN, HIGHLIGHTER, CALLIGRAPHY, ERASER, SELECT, SHAPE, HAND, TEXT, TAPE }
 
 /** How a stroke looks. */
-enum class Brush { PEN, HIGHLIGHTER, CALLIGRAPHY }
+/** FIXED (a pen with one constant width) was added later: brushes are stored by position, so new ones go at the end. */
+enum class Brush { PEN, HIGHLIGHTER, CALLIGRAPHY, FIXED }
 
 enum class Paper(val label: String) {
     BLANK("blank"), RULED("ruled"), GRID("squares (grid)"), DOTS("dots"), NARROW("narrow ruled"), CORNELL("Cornell notes"), MUSIC("music staff"),

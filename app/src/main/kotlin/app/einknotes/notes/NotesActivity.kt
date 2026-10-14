@@ -485,6 +485,7 @@ class NotesActivity : Activity(), InkView.Host {
                         sheet.choose("Nib", flats, flats.minByOrNull { Math.abs(it.second - s.calFlat) }!!.second) { s.calFlat = it; saveToolSettings() }
                     })
                 }
+                if (ink.tool == Tool.PEN) rows.add(Row("Pen width", if (s.penFixed) "Fixed: the same width however hard you press" else "Pressure: harder presses draw thicker") { s.penFixed = !s.penFixed; saveToolSettings(); showToolOptions() })
                 rows.add(Row("Smoothing", listOf("Off", "Light", "Strong")[s.smoothing.coerceIn(0, 2)]) {
                     sheet.choose("Smoothing", listOf("Off" to 0, "Light" to 1, "Strong" to 2), s.smoothing) { s.smoothing = it; saveToolSettings() }
                 })
@@ -516,7 +517,7 @@ class NotesActivity : Activity(), InkView.Host {
         s.eraserPartial = p.getBoolean("eraserPartial", false); s.eraserRadius = p.getFloat("eraserRadius", 18f)
         s.textSize = p.getFloat("textSize", 38f); s.textGray = p.getInt("textGray", 0); s.textBold = p.getBoolean("textBold", false)
         s.smoothing = p.getInt("smoothing", 0)
-        s.zoomTaps = p.getInt("zoomTaps", 3); s.zoomTarget = p.getFloat("zoomTarget", 3f); s.zoomSquares = p.getBoolean("zoomSquares", false); s.autoAdvance = p.getBoolean("autoAdvance", true); s.textSnap = p.getBoolean("textSnap", true); s.autoDeselectEraser = p.getBoolean("autoDeselect", false)
+        s.zoomTaps = p.getInt("zoomTaps", 3); s.zoomTarget = p.getFloat("zoomTarget", 3f); s.zoomSquares = p.getBoolean("zoomSquares", false); s.autoAdvance = p.getBoolean("autoAdvance", true); s.textSnap = p.getBoolean("textSnap", true); s.autoDeselectEraser = p.getBoolean("autoDeselect", false); s.penFixed = p.getBoolean("penFixed", false)
         s.shapeTool = UserShape.values().getOrElse(p.getInt("shapeTool", UserShape.RECT.ordinal)) { UserShape.RECT }
     }
 
@@ -528,7 +529,7 @@ class NotesActivity : Activity(), InkView.Host {
             .putBoolean("eraserPartial", s.eraserPartial).putFloat("eraserRadius", s.eraserRadius)
             .putFloat("textSize", s.textSize).putInt("textGray", s.textGray).putBoolean("textBold", s.textBold)
             .putInt("smoothing", s.smoothing)
-            .putInt("zoomTaps", s.zoomTaps).putFloat("zoomTarget", s.zoomTarget).putBoolean("zoomSquares", s.zoomSquares).putBoolean("autoAdvance", s.autoAdvance).putBoolean("textSnap", s.textSnap).putBoolean("autoDeselect", s.autoDeselectEraser)
+            .putInt("zoomTaps", s.zoomTaps).putFloat("zoomTarget", s.zoomTarget).putBoolean("zoomSquares", s.zoomSquares).putBoolean("autoAdvance", s.autoAdvance).putBoolean("textSnap", s.textSnap).putBoolean("autoDeselect", s.autoDeselectEraser).putBoolean("penFixed", s.penFixed)
             .putBoolean("shapeSnap", s.shapeSnap).putInt("shapeTool", s.shapeTool.ordinal).apply()
     }
 
@@ -567,7 +568,16 @@ class NotesActivity : Activity(), InkView.Host {
         return b
     }
 
+    /** Every few page turns or zoom changes the whole panel is cleaned once, so ghosts do not pile up. */
+    private var viewChanges = 0
+    private fun noteViewChange() {
+        val every = prefs.getInt("cleanEvery", 8)
+        if (every <= 0) return
+        if (++viewChanges >= every) { viewChanges = 0; ui.postDelayed({ if (!isFinishing) eink.fullRefresh() }, 500) }
+    }
+
     override fun onViewChanged() {
+        noteViewChange()
         if (!::contextBar.isInitialized) return
         zoomLabelBtn.label = ink.zoomLabel()
         updateContext()
@@ -759,7 +769,7 @@ class NotesActivity : Activity(), InkView.Host {
 
     private fun goPage(delta: Int) {
         val n = ink.pageIndex + delta
-        if (n in note.pages.indices) { ink.goToPage(n); refreshChrome() }
+        if (n in note.pages.indices) { ink.goToPage(n); refreshChrome(); noteViewChange() }
     }
 
     // ---- PDF import --------------------------------------------------------------------------
@@ -993,6 +1003,9 @@ class NotesActivity : Activity(), InkView.Host {
                 sheet.choose("Shortcut zooms to", listOf("The spot I tap" to false, "Fixed squares of the page" to true), s.zoomSquares) { s.zoomSquares = it; saveToolSettings() }
             },
             Row("After erasing, go back to my pen", onOff(s.autoDeselectEraser)) { s.autoDeselectEraser = !s.autoDeselectEraser; saveToolSettings(); showSettings() },
+            Row("Clean the screen automatically", prefs.getInt("cleanEvery", 8).let { if (it == 0) "Off" else "after every $it page turns or zoom changes" }) {
+                sheet.choose("Clean the screen", listOf("Off" to 0, "Every 4 changes" to 4, "Every 8 changes" to 8, "Every 15 changes" to 15), prefs.getInt("cleanEvery", 8)) { prefs.edit().putInt("cleanEvery", it).apply() }
+            },
             Row("Move along while zoomed in", onOff(s.autoAdvance) + " - lift the pen near the right edge and the page slides over") { s.autoAdvance = !s.autoAdvance; saveToolSettings(); showSettings() },
             Row("Keep the screen on", onOff(prefs.getBoolean("keepAwake", false))) {
                 val on = !prefs.getBoolean("keepAwake", false)
