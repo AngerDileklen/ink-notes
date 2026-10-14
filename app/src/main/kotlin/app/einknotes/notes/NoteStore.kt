@@ -22,13 +22,14 @@ import java.io.FileOutputStream
  *      type 3 text:   text utf | x,y,boxW,size floats | gray int | bold byte
  *      type 4 image:  file utf | l,t,r,b floats | srcW int | srcH int
  *      type 5 tape:   l,t,r,b floats | covered byte
-*   v6: text-box text is an int byte length + UTF-8 bytes (no 64 KB limit)
+ *   v7: per page: spacing float after the flags byte
+ *   v6: text-box text is an int byte length + UTF-8 bytes (no 64 KB limit)
  *   v5: every item is followed by recId int | recMs int; after the last page: recordingCount int, per recording id int | file utf | startedAt long | durationMs int
  *   (v1/v2 items are strokes without a type byte; v1 pages have no size or pdf fields)
  */
 object NoteStore {
     private const val MAGIC = 0x494E4B4E   // "INKN"
-    private const val VERSION = 6
+    private const val VERSION = 7
 
     const val ITEM_STROKE = 1
     const val ITEM_SHAPE = 2
@@ -62,6 +63,7 @@ object NoteStore {
                 out.writeByte(if (pdf != null) 1 else 0)
                 if (pdf != null) { out.writeUTF(pdf); out.writeInt(page.pdfPage) }
                 out.writeByte(if (page.bookmarked) 1 else 0)
+                out.writeFloat(page.spacing)
                 out.writeInt(page.items.size)
                 for (item in page.items) { writeItem(out, item); out.writeInt(item.recId); out.writeInt(item.recMs) }
             }
@@ -156,7 +158,7 @@ object NoteStore {
             DataInputStream(BufferedInputStream(FileInputStream(file), 1 shl 16)).use { inp ->
                 require(inp.readInt() == MAGIC) { "not a notebook file" }
                 val version = inp.readInt()
-                require(version in 1..6) { "unknown notebook version" }
+                require(version in 1..7) { "unknown notebook version" }
                 val note = if (version >= 3) {
                     val title = inp.readUTF(); val created = inp.readLong(); val modified = inp.readLong()
                     NoteData(title, created).also { it.modified = modified }
@@ -171,6 +173,7 @@ object NoteStore {
                         if (inp.readByte().toInt() == 1) { page.pdfFile = inp.readUTF(); page.pdfPage = inp.readInt() }
                     }
                     if (version >= 4) page.bookmarked = (inp.readByte().toInt() and 1) != 0
+                    if (version >= 7) page.spacing = inp.readFloat().coerceIn(20f, 400f)
                     val count = inp.readInt()
                     repeat(count) {
                         val item = readItem(inp, version)

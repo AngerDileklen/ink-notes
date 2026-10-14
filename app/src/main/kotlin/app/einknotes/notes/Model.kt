@@ -12,7 +12,8 @@ import kotlin.math.sqrt
 
 /** All coordinates in the model are "page units". One page unit is one pixel on this tablet at zoom 1. */
 const val PAGE_W = 1404f
-const val PAGE_H = 1872f
+/** A4 proportions (1 : 1.4142) at the tablet's width. Older notebooks keep the page sizes they were made with. */
+const val PAGE_H = 1985.6f
 
 /** What the pen does when it touches the page. */
 enum class Tool { PEN, HIGHLIGHTER, CALLIGRAPHY, ERASER, SELECT, SHAPE, HAND, TEXT, TAPE }
@@ -21,9 +22,18 @@ enum class Tool { PEN, HIGHLIGHTER, CALLIGRAPHY, ERASER, SELECT, SHAPE, HAND, TE
 enum class Brush { PEN, HIGHLIGHTER, CALLIGRAPHY }
 
 enum class Paper(val label: String) {
-    BLANK("blank"), RULED("ruled"), GRID("grid"), DOTS("dots"), NARROW("narrow ruled"), CORNELL("Cornell notes"), MUSIC("music staff");
+    BLANK("blank"), RULED("ruled"), GRID("squares (grid)"), DOTS("dots"), NARROW("narrow ruled"), CORNELL("Cornell notes"), MUSIC("music staff");
 
     fun next() = values()[(ordinal + 1) % values().size]
+}
+
+/** Page proportions. The page is always as wide as the tablet; the height follows the paper. */
+enum class PageSize(val label: String, val ratio: Float) {
+    A4("A4", 1.41421356f), LETTER("US Letter", 11f / 8.5f), LEGAL("US Legal", 14f / 8.5f), TABLET("Tablet screen (3:4)", 4f / 3f);
+
+    companion object {
+        fun of(w: Float, h: Float): PageSize? = values().firstOrNull { Math.abs(h / w - it.ratio) < 0.01f }
+    }
 }
 
 /** Pressure (0..1, already normalised) -> pen width in page units. */
@@ -408,6 +418,15 @@ class PageData(var paper: Paper = Paper.RULED) {
 
     /** A page marked for quick return (shown with a star in the Pages screen). */
     var bookmarked = false
+
+    /** Distance between ruled lines / grid squares / dots, in page units (64 is about 9.5 mm on A4). */
+    var spacing = 64f
+}
+
+/** An empty page with the same paper, spacing and proportions as [src] (PDF pages give a plain page). */
+fun blankPageLike(src: PageData): PageData = PageData(if (src.isPdf) Paper.BLANK else src.paper).also {
+    it.spacing = src.spacing
+    if (!src.isPdf) it.h = it.w * src.h / src.w
 }
 
 /** One audio recording of a notebook. [file] is a name inside the app's audio folder. */

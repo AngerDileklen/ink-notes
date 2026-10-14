@@ -92,6 +92,8 @@ class NotesActivity : Activity(), InkView.Host {
     private val toolButtons = LinkedHashMap<Tool, EButton>()
     private lateinit var wellsBar: LinearLayout
     private lateinit var contextBar: FrameLayout
+    private lateinit var zoomBar: LinearLayout
+    private lateinit var zoomLabelBtn: EButton
     private lateinit var pagesPanel: PagesPanel
 
     // selection bar
@@ -194,6 +196,7 @@ class NotesActivity : Activity(), InkView.Host {
         recBtn = icon("mic", "Rec") { onRecTapped() }
         top.addView(undoBtn, LinearLayout.LayoutParams(96, Eink.BAR_H))
         top.addView(redoBtn, LinearLayout.LayoutParams(96, Eink.BAR_H))
+        top.addView(icon("paper", "Paper") { showPaper() }, LinearLayout.LayoutParams(110, Eink.BAR_H))
         top.addView(recBtn, LinearLayout.LayoutParams(110, Eink.BAR_H))
         top.addView(icon("more", null) { showMore() }, LinearLayout.LayoutParams(96, Eink.BAR_H))
         root.addView(top)
@@ -221,6 +224,7 @@ class NotesActivity : Activity(), InkView.Host {
         pageArea.addView(contextBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
         selectionBar = buildSelectionBar()
         playBar = buildPlayBar()
+        zoomBar = buildZoomBar()
         root.addView(pageArea, LinearLayout.LayoutParams(-1, 0, 1f))
 
         frame = FrameLayout(this)
@@ -258,6 +262,7 @@ class NotesActivity : Activity(), InkView.Host {
         when {
             AudioNotes.playing != null -> showContext(playBar)
             ink.tool == Tool.SELECT && (ink.hasSelection || Clipboard.items.isNotEmpty()) -> showContext(selectionBar)
+            ink.zoomed -> showContext(zoomBar)
             else -> showContext(null)
         }
     }
@@ -401,7 +406,9 @@ class NotesActivity : Activity(), InkView.Host {
                 small(null, "Select all") { ink.selectAll() }
             }
             Tool.HAND -> {
-                small(null, "Zoom " + ink.zoomLabel()) { ink.cycleZoom(); buildWells() }
+                small(null, "Whole page") { ink.zoomOut() }
+                small(null, "Page width") { ink.zoomToWidth() }
+                small(null, "Zoom " + ink.zoomLabel()) { ink.cycleZoom() }
             }
         }
         if (ink.tool != Tool.HAND && ink.tool != Tool.SELECT && ink.tool != Tool.TAPE) {
@@ -469,6 +476,7 @@ class NotesActivity : Activity(), InkView.Host {
         s.eraserPartial = p.getBoolean("eraserPartial", false); s.eraserRadius = p.getFloat("eraserRadius", 18f)
         s.textSize = p.getFloat("textSize", 38f); s.textGray = p.getInt("textGray", 0); s.textBold = p.getBoolean("textBold", false)
         s.smoothing = p.getInt("smoothing", 0)
+        s.zoomTaps = p.getInt("zoomTaps", 3); s.zoomTarget = p.getFloat("zoomTarget", 3f); s.zoomSquares = p.getBoolean("zoomSquares", false); s.autoAdvance = p.getBoolean("autoAdvance", true)
         s.shapeTool = UserShape.values().getOrElse(p.getInt("shapeTool", UserShape.RECT.ordinal)) { UserShape.RECT }
     }
 
@@ -480,6 +488,7 @@ class NotesActivity : Activity(), InkView.Host {
             .putBoolean("eraserPartial", s.eraserPartial).putFloat("eraserRadius", s.eraserRadius)
             .putFloat("textSize", s.textSize).putInt("textGray", s.textGray).putBoolean("textBold", s.textBold)
             .putInt("smoothing", s.smoothing)
+            .putInt("zoomTaps", s.zoomTaps).putFloat("zoomTarget", s.zoomTarget).putBoolean("zoomSquares", s.zoomSquares).putBoolean("autoAdvance", s.autoAdvance)
             .putBoolean("shapeSnap", s.shapeSnap).putInt("shapeTool", s.shapeTool.ordinal).apply()
     }
 
@@ -503,6 +512,25 @@ class NotesActivity : Activity(), InkView.Host {
         selectionButtons = listOf(del, copy, cut, dup, done)
         for (v in listOf(del, copy, cut, dup, pasteBtn, editBtn, done)) b.addView(v, LinearLayout.LayoutParams(0, Eink.BAR_H, 1f).apply { leftMargin = 6 })
         return b
+    }
+
+    /** Shown while zoomed in: move around the page, change the zoom, go back to the whole page. */
+    private fun buildZoomBar(): LinearLayout {
+        val b = bar()
+        zoomLabelBtn = EButton(this, null, "3x") { ink.cycleZoom() }.apply { textSize = 26f }
+        val items = listOf<View>(
+            EButton(this, "left", null) { ink.panBy(-0.6f, 0f) }, EButton(this, "up", null) { ink.panBy(0f, -0.6f) },
+            EButton(this, "down", null) { ink.panBy(0f, 0.6f) }, EButton(this, "right", null) { ink.panBy(0.6f, 0f) },
+            zoomLabelBtn, barButton("Page width") { ink.zoomToWidth() }, barButton("Whole page") { ink.zoomOut() })
+        for (v in items) b.addView(v, LinearLayout.LayoutParams(0, Eink.BAR_H, 1f).apply { leftMargin = 6 })
+        return b
+    }
+
+    override fun onViewChanged() {
+        if (!::contextBar.isInitialized) return
+        zoomLabelBtn.label = ink.zoomLabel()
+        updateContext()
+        if (ink.tool == Tool.HAND) buildWells()
     }
 
     private fun updateSelectionBar() {
@@ -761,7 +789,7 @@ class NotesActivity : Activity(), InkView.Host {
         sheet.list("Notebook", listOf(
             Row("Pages and bookmarks", "Thumbnails, reorder, copy, delete, go to a page") { showPages() },
             Row("Add a page after this one") { ink.addPageAfterCurrent() },
-            Row("Paper for this page", ink.page.paper.label) { choosePaper() },
+            Row("Paper and page size", ink.page.paper.label) { showPaper() },
             Row("Insert image...") { pickImage() },
             Row("Import PDF into this notebook...") { pickPdf() },
             Row("Audio recordings", if (note.recordings.isEmpty()) "None yet" else "${note.recordings.size}") { showRecordings() },
@@ -773,10 +801,34 @@ class NotesActivity : Activity(), InkView.Host {
         ))
     }
 
-    private fun choosePaper() {
-        sheet.choose("Paper for this page", Paper.values().map { it.label.replaceFirstChar { c -> c.uppercase() } to it }, ink.page.paper) {
-            ink.setPaper(it); refreshChrome()
+    private fun mmOf(units: Float) = units / 6.686f
+    private fun sizeName(pg: PageData) = PageSize.of(pg.w, pg.h)?.label ?: "Custom"
+
+    /** One place for the page background: paper, spacing and size, with "use on every page". */
+    private fun showPaper() {
+        val pg = ink.page
+        if (pg.isPdf) {
+            sheet.list("Paper", listOf(Row("This page is a PDF page", "Its background is the PDF. Add a blank page to choose paper.", enabled = false) { },
+                Row("Add a blank page after this one") { ink.addPageAfterCurrent() }))
+            return
         }
+        val rows = ArrayList<Row>()
+        for (p in Paper.values()) rows.add(Row(p.label.replaceFirstChar { it.uppercase() }, selected = pg.paper == p) { ink.setPaper(p); refreshChrome() })
+        val spacings = listOf(5f, 6f, 7f, 8f, 9.5f, 12f, 15f)
+        rows.add(Row("Spacing of lines and squares", "%.1f mm".format(mmOf(pg.spacing))) {
+            sheet.list("Spacing", spacings.map { mm ->
+                Row("%.1f mm".format(mm), selected = Math.abs(mmOf(pg.spacing) - mm) < 0.3f) { ink.setSpacing(mm * 6.686f) }
+            })
+        })
+        rows.add(Row("Page size", sizeName(pg)) {
+            sheet.choose("Page size", PageSize.values().map { it.label to it }, PageSize.of(pg.w, pg.h)) { ink.setPageSize(it); refreshChrome() }
+        })
+        rows.add(Row("Use this paper on every page", "Paper, spacing and size of this page; PDF pages are left alone") {
+            sheet.confirm("Use on every page?", "All plain pages of this notebook get ${pg.paper.label}, ${sizeName(pg)}, spacing %.1f mm.".format(mmOf(pg.spacing)), "Apply to all") {
+                ink.applyPaperToAll(); refreshChrome(); say("Paper applied to every page")
+            }
+        })
+        sheet.list("Paper for page ${ink.pageIndex + 1}", rows)
     }
 
     private fun confirmDeletePage() {
@@ -801,6 +853,16 @@ class NotesActivity : Activity(), InkView.Host {
                     ink.sideButtonTool = it; prefs.edit().putInt("side", it.ordinal).apply()
                 }
             },
+            Row("Zoom shortcut", if (s.zoomTaps == 0) "Off" else "Tap ${s.zoomTaps} times in a row with the pen to zoom in or out") {
+                sheet.choose("Zoom shortcut", listOf("Off" to 0, "Tap 3 times" to 3, "Tap 4 times" to 4), s.zoomTaps) { s.zoomTaps = it; saveToolSettings() }
+            },
+            Row("Shortcut zoom level", "${"%.0f".format(s.zoomTarget)}x the whole page") {
+                sheet.choose("Zoom level", listOf("2x" to 2f, "3x" to 3f, "4x" to 4f), s.zoomTarget) { s.zoomTarget = it; saveToolSettings() }
+            },
+            Row("Shortcut zooms to", if (s.zoomSquares) "Fixed squares of the page" else "The spot I tap") {
+                sheet.choose("Shortcut zooms to", listOf("The spot I tap" to false, "Fixed squares of the page" to true), s.zoomSquares) { s.zoomSquares = it; saveToolSettings() }
+            },
+            Row("Move along while zoomed in", onOff(s.autoAdvance) + " - lift the pen near the right edge and the page slides over") { s.autoAdvance = !s.autoAdvance; saveToolSettings(); showSettings() },
             Row("Keep the screen on", onOff(prefs.getBoolean("keepAwake", false))) {
                 val on = !prefs.getBoolean("keepAwake", false)
                 prefs.edit().putBoolean("keepAwake", on).apply()
@@ -999,6 +1061,26 @@ class NotesActivity : Activity(), InkView.Host {
                     "more" -> showMore()
                     "settings" -> showSettings()
                     "sheet_close" -> sheet.hide()
+                    "tap_seq" -> {
+                        // simulated quick pen taps (adb input is too slow to tap three times within a second)
+                        val x = i.getFloatExtra("x", 500f); val y = i.getFloatExtra("y", 700f); val n = i.getIntExtra("n", 3)
+                        for (k in 0 until n) {
+                            ui.postDelayed({
+                                val t = android.os.SystemClock.uptimeMillis()
+                                ink.dispatchTouchEvent(android.view.MotionEvent.obtain(t, t, android.view.MotionEvent.ACTION_DOWN, x, y, 0))
+                            }, k * 230L)
+                            ui.postDelayed({
+                                val t = android.os.SystemClock.uptimeMillis()
+                                ink.dispatchTouchEvent(android.view.MotionEvent.obtain(t - 60, t, android.view.MotionEvent.ACTION_UP, x, y, 0))
+                            }, k * 230L + 70L)
+                        }
+                    }
+                    "paper_sheet" -> showPaper()
+                    "page_size" -> PageSize.values().firstOrNull { it.name == i.getStringExtra("v") }?.let { ink.setPageSize(it); refreshChrome() }
+                    "spacing" -> ink.setSpacing(i.getFloatExtra("v", 64f))
+                    "zoom_at" -> ink.zoomAt(i.getFloatExtra("x", 700f), i.getFloatExtra("y", 800f), i.getFloatExtra("v", 3f))
+                    "zoom_whole" -> ink.zoomOut()
+                    "zoom_state" -> Log.d("InkDebug", "zoomRel=${ink.zoomRel}")
                     "ruler" -> ink.rulerOn = i.getBooleanExtra("v", true)
                     "smooth" -> { ink.settings.smoothing = i.getIntExtra("v", 1); saveToolSettings() }
                     "rec_start" -> if (AudioNotes.active == null) onRecTapped()

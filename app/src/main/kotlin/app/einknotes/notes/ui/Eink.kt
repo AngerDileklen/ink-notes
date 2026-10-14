@@ -372,6 +372,7 @@ object Icons {
             "hand" -> { p.moveTo(8f, 21f); p.lineTo(5f, 14f); p.quadTo(4f, 11f, 7f, 12f); p.lineTo(8f, 14f); p.lineTo(8f, 5f); p.quadTo(9.5f, 3f, 11f, 5f); p.lineTo(11f, 11f); p.lineTo(11f, 4f); p.quadTo(12.5f, 2f, 14f, 4f); p.lineTo(14f, 11f); p.lineTo(14f, 5.5f); p.quadTo(15.5f, 3.5f, 17f, 5.5f); p.lineTo(17f, 15f); p.quadTo(17f, 19f, 15f, 21f); c.drawPath(p, stroke) }
             "undo" -> { p.moveTo(9f, 6f); p.lineTo(4f, 11f); p.lineTo(9f, 16f); c.drawPath(p, stroke); val q = Path(); q.moveTo(4f, 11f); q.lineTo(15f, 11f); q.quadTo(20f, 11f, 20f, 16f); q.quadTo(20f, 20f, 15f, 20f); q.lineTo(11f, 20f); c.drawPath(q, stroke) }
             "redo" -> { c.save(); c.scale(-1f, 1f, 12f, 12f); draw(c, "undo", 12f, 12f, 24f, stroke, fill); c.restore() }
+            "paper" -> { c.drawRect(4f, 3f, 20f, 21f, stroke); for (y in intArrayOf(9, 15)) c.drawLine(4f, y.toFloat(), 20f, y.toFloat(), stroke); for (x in intArrayOf(10, 15)) c.drawLine(x.toFloat(), 3f, x.toFloat(), 21f, stroke) }
             "pages" -> { c.drawRect(6f, 3f, 18f, 18f, stroke); c.drawLine(9f, 21f, 21f, 21f, stroke); c.drawLine(21f, 21f, 21f, 7f, stroke) }
             "mic" -> { c.drawRoundRect(RectF(9f, 3f, 15f, 14f), 3f, 3f, stroke); p.moveTo(6f, 11f); p.quadTo(6f, 18f, 12f, 18f); p.quadTo(18f, 18f, 18f, 11f); c.drawPath(p, stroke); c.drawLine(12f, 18f, 12f, 21f, stroke) }
             "stop" -> c.drawRect(6f, 6f, 18f, 18f, fill)

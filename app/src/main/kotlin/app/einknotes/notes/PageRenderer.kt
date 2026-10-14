@@ -63,7 +63,8 @@ class PageRenderer(private val forExport: Boolean = false) {
 
     fun drawPaper(c: Canvas, page: PageData, scale: Float, tx: Float, ty: Float) {
         val l = tx; val t = ty; val r = tx + page.w * scale; val b = ty + page.h * scale
-        val step = 64f * scale
+        val step = page.spacing * scale
+        val k = page.spacing / 64f
         when (page.paper) {
             Paper.BLANK -> { }
             Paper.RULED -> {
@@ -77,7 +78,7 @@ class PageRenderer(private val forExport: Boolean = false) {
                 while (x < r) { c.drawLine(x, t, x, b, linePaint); x += step }
             }
             Paper.NARROW -> {
-                val st = 40f * scale
+                val st = 40f * k * scale
                 var y = t + 100f * scale
                 while (y < b - 20f * scale) { c.drawLine(l + 40f * scale, y, r - 40f * scale, y, linePaint); y += st }
             }
@@ -92,7 +93,7 @@ class PageRenderer(private val forExport: Boolean = false) {
                 while (y < summary - 10f * scale) { c.drawLine(cue + 18f * scale, y, r - 30f * scale, y, linePaint); y += step }
             }
             Paper.MUSIC -> {
-                val gap = 15f * scale
+                val gap = 15f * k * scale
                 var top = t + 110f * scale
                 while (top + 4 * gap < b - 40f * scale) {
                     for (k in 0..4) c.drawLine(l + 50f * scale, top + k * gap, r - 50f * scale, top + k * gap, linePaint)

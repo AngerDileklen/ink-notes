@@ -47,6 +47,14 @@ class ToolSettings {
     var textBold = false
     /** Pen smoothing: 0 off, 1 light, 2 strong. */
     var smoothing = 0
+    /** Tap this many times in a row with the pen to zoom in or out (0 = off). */
+    var zoomTaps = 3
+    /** How far the shortcut zooms in, relative to the whole page. */
+    var zoomTarget = 3f
+    /** True: jump to fixed squares of the page. False: centre on the tapped spot. */
+    var zoomSquares = false
+    /** While zoomed in, the view moves along by itself when the pen lifts near the right edge. */
+    var autoAdvance = true
 }
 
 /** How far the pen position moves toward the real position at each sample, for smoothing off / light / strong. */
@@ -73,6 +81,8 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         fun onSelectionChanged()
         /** The Text tool was tapped at (x, y) in page units; [existing] is the text box under the pen, if any. */
         fun onTextRequested(x: Float, y: Float, existing: TextItem?)
+        /** Zoom or scroll position changed. */
+        fun onViewChanged() {}
     }
 
     // ---- state -------------------------------------------------------------------------------
@@ -87,9 +97,12 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     val page: PageData get() = note.pages[pageIndex]
 
     private val renderer = PageRenderer()
-    private val zoomSteps = floatArrayOf(1f, 1.5f, 2f, 3f)
-    var zoomIndex = 0
+    private val zoomSteps = floatArrayOf(1f, 1.5f, 2f, 3f, 4f)
+    /** Zoom relative to the whole page fitting the view (1 = whole page). */
+    var zoomRel = 1f
         private set
+    val zoomed get() = zoomRel > 1.02f
+    val zoomIndex get() = if (!zoomed) 0 else 1
     private var fit = 1f
     private var scale = 1f
     private var tx = 0f
@@ -244,7 +257,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     fun ignoreVirtualFor(ms: Long) { ignoreVirtualUntil = SystemClock.uptimeMillis() + ms }
 
     fun describe(): String =
-        "page=${pageIndex + 1}/${note.pages.size} items=${page.items.size} tool=$tool zoomIndex=$zoomIndex scale=${"%.3f".format(scale)} " +
+        "page=${pageIndex + 1}/${note.pages.size} items=${page.items.size} tool=$tool zoomIndex=$zoomIndex scale=${"%.3f".format(scale)} tx=${tx.toInt()} ty=${ty.toInt()} " +
             "paper=${page.paper} undo=${undoStack.size} redo=${redoStack.size} selected=${selection.size} view=${width}x${height}"
 
     // ---- page operations ---------------------------------------------------------------------
@@ -260,7 +273,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     fun addPageAfterCurrent() {
         clearSelection()
-        note.pages.add(pageIndex + 1, PageData(if (page.isPdf) Paper.BLANK else page.paper))
+        note.pages.add(pageIndex + 1, blankPageLike(page))
         pageIndex += 1
         fitToView(keepZoom = false)
         transformChanged()
@@ -328,6 +341,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         if (i !in note.pages.indices) return
         val src = note.pages[i]
         val copy = PageData(src.paper)
+        copy.spacing = src.spacing
         copy.w = src.w; copy.h = src.h; copy.pdfFile = src.pdfFile; copy.pdfPage = src.pdfPage
         for (item in src.items) copy.items.add(item.copy())
         note.pages.add(i + 1, copy)
@@ -338,7 +352,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     /** An empty page right after page [i]. */
     fun insertBlankAfter(i: Int) {
         if (i !in note.pages.indices) return
-        note.pages.add(i + 1, PageData(if (note.pages[i].isPdf) Paper.BLANK else note.pages[i].paper))
+        note.pages.add(i + 1, blankPageLike(note.pages[i]))
         if (i < pageIndex) pageIndex += 1
         host.onDocumentChanged()
     }
@@ -349,23 +363,85 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         host.onDocumentChanged()
     }
 
-    /** Fit -> 1.5x -> 2x -> 3x -> back to Fit. */
-    fun cycleZoom() { zoomBy(if (zoomIndex >= zoomSteps.size - 1) -zoomIndex else 1) }
+    fun setSpacing(units: Float) {
+        page.spacing = units.coerceIn(20f, 400f)
+        rebuild()
+        host.onDocumentChanged()
+    }
 
-    fun zoomLabel(): String = when (zoomIndex) { 0 -> "Fit"; 1 -> "1.5x"; 2 -> "2x"; else -> "3x" }
+    /** Changes the proportions of a plain page (writing stays where it is, measured from the top left). */
+    fun setPageSize(s: PageSize) {
+        if (page.isPdf) return
+        page.h = page.w * s.ratio
+        fitToView(keepZoom = true)
+        transformChanged()
+        rebuild()
+        host.onDocumentChanged()
+        host.onViewChanged()
+    }
+
+    /** Gives every plain page this page's paper, spacing and proportions. */
+    fun applyPaperToAll() {
+        val src = page
+        for (p in note.pages) if (!p.isPdf) { p.paper = src.paper; p.spacing = src.spacing; if (!src.isPdf) p.h = p.w * src.h / src.w }
+        fitToView(keepZoom = true)
+        transformChanged()
+        rebuild()
+        host.onDocumentChanged()
+    }
+
+    /** Fit -> 1.5x -> 2x -> 3x -> 4x -> back to Fit. */
+    fun cycleZoom() { setZoomCentered(zoomSteps.firstOrNull { it > zoomRel + 0.02f } ?: 1f) }
+
+    fun zoomLabel(): String = if (!zoomed) "Fit" else "%.1fx".format(zoomRel).replace(".0x", "x")
 
     fun zoomBy(step: Int) {
-        val next = (zoomIndex + step).coerceIn(0, zoomSteps.size - 1)
-        if (next == zoomIndex) return
-        // keep the page point under the middle of the view fixed
+        val next = if (step > 0) zoomSteps.firstOrNull { it > zoomRel + 0.02f } else zoomSteps.lastOrNull { it < zoomRel - 0.02f }
+        setZoomCentered(next ?: return)
+    }
+
+    /** Zoom so the page is as wide as the view. */
+    fun zoomToWidth() { setZoomCentered(max(1f, (width / page.w) / fit)) }
+
+    /** Keeps the page point under the middle of the view fixed. */
+    private fun setZoomCentered(rel: Float) {
+        if (Math.abs(rel - zoomRel) < 0.001f) return
         val cx = width / 2f; val cy = height / 2f
         val px = (cx - tx) / scale; val py = (cy - ty) / scale
-        zoomIndex = next
-        scale = fit * zoomSteps[zoomIndex]
+        zoomRel = rel
+        scale = fit * zoomRel
         tx = cx - px * scale; ty = cy - py * scale
         clampOffsets()
         transformChanged()
         rebuild()
+        host.onViewChanged()
+    }
+
+    /** Zooms in on the page point under view position (vx, vy): centred there, or onto the fixed square it lies in. */
+    fun zoomAt(vx: Float, vy: Float, rel: Float) {
+        val px = (vx - tx) / scale; val py = (vy - ty) / scale
+        zoomRel = rel.coerceAtLeast(1f)
+        scale = fit * zoomRel
+        if (settings.zoomSquares) {
+            val cw = width / scale; val ch = height / scale        // one square, in page units
+            val ix = (px / cw).toInt(); val iy = (py / ch).toInt()
+            tx = -ix * cw * scale; ty = -iy * ch * scale
+        } else {
+            tx = width / 2f - px * scale; ty = height / 2f - py * scale
+        }
+        clampOffsets()
+        transformChanged()
+        rebuild()
+        host.onViewChanged()
+    }
+
+    /** Back to the whole page. */
+    fun zoomOut() { zoomRel = 1f; fitToView(keepZoom = true); transformChanged(); rebuild(); host.onViewChanged() }
+
+    /** The zoom shortcut: zoomed out -> zoom in where the pen is; zoomed in -> back to the whole page. */
+    fun toggleZoomAt(vx: Float, vy: Float) {
+        if (zoomed) zoomOut()
+        else zoomAt(vx, vy, settings.zoomTarget)
     }
 
     fun panBy(dxFraction: Float, dyFraction: Float) {
@@ -373,6 +449,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         clampOffsets()
         transformChanged()
         rebuild()
+        host.onViewChanged()
     }
 
     // ---- undo / redo -------------------------------------------------------------------------
@@ -474,8 +551,8 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private fun fitToView(keepZoom: Boolean) {
         if (width <= 0 || height <= 0) return
         fit = min(width / page.w, height / page.h)
-        if (!keepZoom) zoomIndex = 0
-        scale = fit * zoomSteps[zoomIndex]
+        if (!keepZoom) zoomRel = 1f
+        scale = fit * zoomRel
         tx = 0f; ty = 0f
         clampOffsets()
     }
@@ -653,6 +730,9 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             MotionEvent.ACTION_DOWN -> {
                 host.onPenDown()
                 lastVx = e.x; lastVy = e.y
+                removeCallbacks(advance)
+                tapDownTime = SystemClock.uptimeMillis(); tapDownX = e.x; tapDownY = e.y
+                tapEligible = settings.zoomTaps > 0 && zoomTapTool(active)
                 when (active) {
                     Tool.PEN, Tool.HIGHLIGHTER, Tool.CALLIGRAPHY -> {
                         clearSelection()
@@ -685,14 +765,31 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                 move(e.x, e.y, e.pressure)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                var zoomTrigger = false
+                var wasTap = false
+                if (e.actionMasked == MotionEvent.ACTION_UP && tapEligible) {
+                    val now = SystemClock.uptimeMillis()
+                    wasTap = now - tapDownTime < 320 && hypot(e.x - tapDownX, e.y - tapDownY) < 14f
+                    if (wasTap) {
+                        val chained = tapSeq > 0 && now - lastTapUp < 700 && hypot(e.x - lastTapX, e.y - lastTapY) < 60f
+                        tapSeq = if (chained) tapSeq + 1 else 1
+                        if (!chained) tapDots.clear()
+                        lastTapUp = now; lastTapX = e.x; lastTapY = e.y
+                        zoomTrigger = tapSeq >= settings.zoomTaps
+                    } else { tapSeq = 0; tapDots.clear() }
+                }
                 when {
+                    writing && zoomTrigger -> cancelStroke()
                     writing -> {
                         // The lift-off position is part of the stroke: without it every line ends a little short.
                         if (e.actionMasked == MotionEvent.ACTION_UP && snappedShape == null) {
                             for (i in 0 until e.historySize) move(e.getHistoricalX(i), e.getHistoricalY(i), e.getHistoricalPressure(i))
                             if (rSide != 0) { projectToRuler(e.x, e.y); finalPoint(projX, projY) } else finalPoint(e.x, e.y)
                         }
+                        val before = page.items.size
                         endStroke()
+                        if (wasTap && page.items.size > before) tapDots.add(page.items.last())
+                        if (!wasTap && zoomed && settings.autoAdvance) { advanceX = e.x; postDelayed(advance, 250) }
                     }
                     rGrab != 0 -> { rGrab = 0; invalidate() }
                     tapeDown -> endTape(e.x, e.y, e.actionMasked == MotionEvent.ACTION_UP)
@@ -713,10 +810,63 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                     }
                     selMode != SelMode.NONE -> endSelectGesture(e.x, e.y)
                 }
+                if (zoomTrigger) {
+                    removeTapDots(); tapSeq = 0
+                    clearSelection()
+                    toggleZoomAt(e.x, e.y)
+                }
                 host.onPenUp()
             }
         }
         return true
+    }
+
+    // the zoom shortcut: several quick taps at one spot
+    private var tapDownTime = 0L
+    private var tapDownX = 0f
+    private var tapDownY = 0f
+    private var tapEligible = false
+    private var tapSeq = 0
+    private var lastTapUp = 0L
+    private var lastTapX = 0f
+    private var lastTapY = 0f
+    private val tapDots = ArrayList<Item>()
+
+    private fun zoomTapTool(t: Tool) = t == Tool.PEN || t == Tool.HIGHLIGHTER || t == Tool.CALLIGRAPHY || t == Tool.SELECT || t == Tool.HAND || t == Tool.SHAPE
+
+    /** The taps that made the zoom gesture left little dots on the page: take them (and their undo steps) away. */
+    private fun removeTapDots() {
+        if (tapDots.isEmpty()) return
+        val gone = tapDots.toList()
+        page.items.removeAll { it in gone }
+        undoStack.removeAll { it is Cmd.Add && it.items.all { i -> i in gone } }
+        tapDots.clear()
+        host.onDocumentChanged()
+    }
+
+    // auto-advance while zoomed in: lift the pen near the right edge and the page slides left, then down a line at the end
+    private var advanceX = 0f
+    private val advance = Runnable { autoAdvance(advanceX) }
+
+    private fun autoAdvance(x: Float) {
+        if (!zoomed || !settings.autoAdvance || x < width * 0.82f) return
+        val minTx = width - page.w * scale
+        if (tx > minTx + 4f) {
+            tx = max(minTx, tx - (x - width * 0.10f))      // the last ink lands about 10% from the left edge
+        } else {
+            // end of the line: back to the left edge and one line down
+            val ruled = page.paper != Paper.BLANK && page.paper != Paper.MUSIC
+            val step = if (ruled) page.spacing else 0.45f * height / scale
+            tx = 0f; ty -= step * scale
+        }
+        clampOffsets(); transformChanged(); rebuild(); host.onViewChanged()
+    }
+
+    private fun cancelStroke() {
+        removeCallbacks(holdCheck)
+        painter = null; writing = false; rSide = 0; snappedShape = null
+        hlBase?.recycle(); hlBase = null
+        rebuild()
     }
 
     private var shapeDragging = false

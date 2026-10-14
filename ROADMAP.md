@@ -75,3 +75,12 @@ Source: `clipbrain-ios/research/notability-teardown/REPORT-2-UX.md` (screens, to
 | 5 | PDF text via pdfium: find with hit highlights, highlight text lines, copy text, outline | |
 | 6 | Paper sizes (Letter, A4, A5...), about 20 templates drawn in code with a picker, culling/caching, refresh policy | |
 | 7 | AI with the user's key (OpenRouter, Gemini, OpenAI, Anthropic): summary, flashcards + quiz, audio transcript, ask about this page/PDF | |
+
+## Paper and zoom (user request, 2026-10-14, v0.13)
+| Feature | Status |
+|---|---|
+| Paper button in the top bar: blank, ruled, squares, dots, narrow, Cornell, music; spacing 5-15 mm; page size A4 / Letter / Legal / Tablet; "use on every page" | DONE |
+| New pages are A4 (old notebooks keep their size; Page size changes any plain page) | DONE |
+| Zoom shortcut: tap 3 (or 4) times in a row with the pen to zoom in where the pen is, again to zoom out; level 2x/3x/4x; "spot I tap" or "fixed squares"; the tap dots are removed | DONE (tested with simulated taps) |
+| Zoom bar while zoomed: pan arrows, level, Page width, Whole page | DONE |
+| Move along while zoomed: lift the pen near the right edge and the page slides, at the line end it returns left one line down | DONE |
