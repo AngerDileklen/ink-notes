@@ -23,6 +23,13 @@ object AudioNotes {
     private var player: MediaPlayer? = null
     private var startedAt = 0L
 
+    /** Playback speed (1, 1.5 or 2). */
+    var speed = 1f
+        set(v) {
+            field = v
+            try { if (player?.isPlaying == true) player?.playbackParams = player!!.playbackParams.setSpeed(v) } catch (_: Throwable) { }
+        }
+
     /** The recording in progress, if any. */
     var active: Recording? = null
         private set
@@ -95,6 +102,7 @@ object AudioNotes {
             if (fromMs > 0) p.seekTo(fromMs.coerceIn(0, p.duration))
             p.setOnCompletionListener { stopPlayback(); onDone() }
             p.start()
+            if (speed != 1f) try { p.playbackParams = p.playbackParams.setSpeed(speed) } catch (_: Throwable) { }
             player = p; playing = rec
             true
         } catch (_: Throwable) { try { p.release() } catch (_: Throwable) { }; false }

@@ -118,7 +118,10 @@ class NotesActivity : Activity(), InkView.Host {
     private lateinit var playPauseBtn: EButton
     private lateinit var playPosBtn: EButton
     private lateinit var replayBtn: EButton
-    private var replayOn = false
+    /** 0 off, 1 later strokes pale, 2 later strokes hidden */
+    private var replayMode = 0
+    private lateinit var speedBtn: EButton
+    private var previousTool = Tool.PEN
 
     // fast-ink presets: (label, mode while writing, mode afterwards)
     private val presets = listOf(
@@ -344,7 +347,10 @@ class NotesActivity : Activity(), InkView.Host {
         if (current == t && t != Tool.HAND) showToolOptions() else selectTool(t)
     }
 
+    override fun onEraserDone() { if (ink.tool == Tool.ERASER && ink.settings.autoDeselectEraser) selectTool(previousTool) }
+
     private fun selectTool(t: Tool) {
+        if (t == Tool.ERASER && ink.tool != Tool.ERASER) previousTool = ink.tool
         if (t != Tool.SELECT) ink.clearSelection()
         ink.tool = t
         for ((tool, b) in toolButtons) b.selectedState = tool == t || (tool == Tool.PEN && t == Tool.CALLIGRAPHY)
@@ -510,7 +516,7 @@ class NotesActivity : Activity(), InkView.Host {
         s.eraserPartial = p.getBoolean("eraserPartial", false); s.eraserRadius = p.getFloat("eraserRadius", 18f)
         s.textSize = p.getFloat("textSize", 38f); s.textGray = p.getInt("textGray", 0); s.textBold = p.getBoolean("textBold", false)
         s.smoothing = p.getInt("smoothing", 0)
-        s.zoomTaps = p.getInt("zoomTaps", 3); s.zoomTarget = p.getFloat("zoomTarget", 3f); s.zoomSquares = p.getBoolean("zoomSquares", false); s.autoAdvance = p.getBoolean("autoAdvance", true); s.textSnap = p.getBoolean("textSnap", true)
+        s.zoomTaps = p.getInt("zoomTaps", 3); s.zoomTarget = p.getFloat("zoomTarget", 3f); s.zoomSquares = p.getBoolean("zoomSquares", false); s.autoAdvance = p.getBoolean("autoAdvance", true); s.textSnap = p.getBoolean("textSnap", true); s.autoDeselectEraser = p.getBoolean("autoDeselect", false)
         s.shapeTool = UserShape.values().getOrElse(p.getInt("shapeTool", UserShape.RECT.ordinal)) { UserShape.RECT }
     }
 
@@ -522,7 +528,7 @@ class NotesActivity : Activity(), InkView.Host {
             .putBoolean("eraserPartial", s.eraserPartial).putFloat("eraserRadius", s.eraserRadius)
             .putFloat("textSize", s.textSize).putInt("textGray", s.textGray).putBoolean("textBold", s.textBold)
             .putInt("smoothing", s.smoothing)
-            .putInt("zoomTaps", s.zoomTaps).putFloat("zoomTarget", s.zoomTarget).putBoolean("zoomSquares", s.zoomSquares).putBoolean("autoAdvance", s.autoAdvance).putBoolean("textSnap", s.textSnap)
+            .putInt("zoomTaps", s.zoomTaps).putFloat("zoomTarget", s.zoomTarget).putBoolean("zoomSquares", s.zoomSquares).putBoolean("autoAdvance", s.autoAdvance).putBoolean("textSnap", s.textSnap).putBoolean("autoDeselect", s.autoDeselectEraser)
             .putBoolean("shapeSnap", s.shapeSnap).putInt("shapeTool", s.shapeTool.ordinal).apply()
     }
 
@@ -543,8 +549,9 @@ class NotesActivity : Activity(), InkView.Host {
         pasteBtn = barButton("Paste") { ink.paste(Clipboard.items) }
         val done = barButton("Done") { ink.clearSelection() }
         editBtn = barButton("Edit text") { editSelectedText() }
-        selectionButtons = listOf(del, copy, cut, dup, done)
-        for (v in listOf(del, copy, cut, dup, pasteBtn, editBtn, done)) b.addView(v, LinearLayout.LayoutParams(0, Eink.BAR_H, 1f).apply { leftMargin = 6 })
+        val more = barButton("Arrange...") { showArrange() }
+        selectionButtons = listOf(del, copy, cut, dup, done, more)
+        for (v in listOf(del, copy, cut, dup, pasteBtn, editBtn, more, done)) b.addView(v, LinearLayout.LayoutParams(0, Eink.BAR_H, 1f).apply { leftMargin = 6 })
         return b
     }
 
@@ -577,6 +584,18 @@ class NotesActivity : Activity(), InkView.Host {
 
     override fun onSelectionChanged() { updateSelectionBar(); updateContext() }
 
+    private fun showArrange() {
+        if (!ink.hasSelection) return
+        val greys = listOf("Black" to 0, "Very dark" to 45, "Dark" to 90, "Mid" to 130, "Light" to 170, "Pale" to 215)
+        sheet.list("Selected items", listOf(
+            Row("Bring to front") { ink.arrangeSelection(true) },
+            Row("Send to back") { ink.arrangeSelection(false) },
+            Row("Flip left-right") { ink.flipSelection(true) },
+            Row("Flip up-down") { ink.flipSelection(false) },
+            Row("Change grey", "For strokes, shapes and text") { sheet.choose("Grey", greys, null) { ink.setSelectionGray(it) } }
+        ))
+    }
+
     override fun onTextRequested(x: Float, y: Float, existing: TextItem?) {
         sheet.input(if (existing != null) "Edit text" else "New text", existing?.text ?: "", multiline = true) { text ->
             if (existing != null) ink.updateText(existing, text) else ink.addText(text, x, y)
@@ -599,7 +618,7 @@ class NotesActivity : Activity(), InkView.Host {
         override fun run() {
             val r = AudioNotes.playing ?: return
             updatePlayUi()
-            ink.setReplay(if (replayOn) r.id else 0, AudioNotes.positionMs())
+            applyReplay(r.id, AudioNotes.positionMs())
             ui.postDelayed(this, 2000)
         }
     }
@@ -675,8 +694,9 @@ class NotesActivity : Activity(), InkView.Host {
         val b = bar()
         playPauseBtn = EButton(this, "pause", null) { if (AudioNotes.isPlaying) AudioNotes.pause() else AudioNotes.resume(); updatePlayUi() }
         playPosBtn = EButton(this, null, "0:00") { }.apply { bordered = false; textSize = 26f }
-        replayBtn = barButton("Replay: off") { replayOn = !replayOn; updatePlayUi(); AudioNotes.playing?.let { ink.setReplay(if (replayOn) it.id else 0, AudioNotes.positionMs()) } }
-        for (v in listOf(playPauseBtn, barButton("-10 s") { AudioNotes.seekTo(AudioNotes.positionMs() - 10000); updatePlayUi() },
+        replayBtn = barButton("Replay: off") { replayMode = (replayMode + 1) % 3; updatePlayUi(); AudioNotes.playing?.let { applyReplay(it.id, AudioNotes.positionMs()) } }
+        speedBtn = barButton("1x") { AudioNotes.speed = when (AudioNotes.speed) { 1f -> 1.5f; 1.5f -> 2f; else -> 1f }; updatePlayUi() }
+        for (v in listOf(playPauseBtn, speedBtn, barButton("-10 s") { AudioNotes.seekTo(AudioNotes.positionMs() - 10000); updatePlayUi() },
             barButton("+10 s") { AudioNotes.seekTo(AudioNotes.positionMs() + 10000); updatePlayUi() }, playPosBtn, replayBtn,
             EButton(this, "stop", null) { stopPlaybackUi() })) b.addView(v, LinearLayout.LayoutParams(0, Eink.BAR_H, 1f).apply { leftMargin = 6 })
         return b
@@ -686,7 +706,8 @@ class NotesActivity : Activity(), InkView.Host {
         if (!::playBar.isInitialized) return
         playPauseBtn.icon = if (AudioNotes.isPlaying) "pause" else "play"
         playPosBtn.label = AudioNotes.clock(AudioNotes.positionMs()) + " / " + AudioNotes.clock(AudioNotes.durationMs())
-        replayBtn.label = "Replay: " + (if (replayOn) "on" else "off")
+        replayBtn.label = "Replay: " + listOf("off", "pale", "hide")[replayMode]
+        speedBtn.label = (if (AudioNotes.speed == 1.5f) "1.5x" else if (AudioNotes.speed == 2f) "2x" else "1x")
     }
 
     private fun startPlayback(r: Recording, from: Int) {
@@ -695,9 +716,11 @@ class NotesActivity : Activity(), InkView.Host {
         ink.onSeekItem = { item -> if (item.recId == r.id) { AudioNotes.seekTo(item.recMs); updatePlayUi() } }
         updatePlayUi()
         updateContext()
-        ink.setReplay(if (replayOn) r.id else 0, from)
+        applyReplay(r.id, from)
         ui.removeCallbacks(playTick); ui.postDelayed(playTick, 2000)
     }
+
+    private fun applyReplay(recId: Int, ms: Int) { ink.setReplay(if (replayMode == 0) 0 else recId, ms, replayMode == 2) }
 
     private fun stopPlaybackUi() {
         AudioNotes.stopPlayback()
@@ -915,7 +938,12 @@ class NotesActivity : Activity(), InkView.Host {
             return
         }
         val rows = ArrayList<Row>()
-        for (p in Paper.values()) rows.add(Row(p.label.replaceFirstChar { it.uppercase() }, selected = pg.paper == p) { ink.setPaper(p); refreshChrome() })
+        fun paperRow(p: Paper) = Row(p.label.replaceFirstChar { it.uppercase() }, selected = pg.paper == p) { ink.setPaper(p); refreshChrome() }
+        for (p in listOf(Paper.BLANK, Paper.RULED, Paper.GRID, Paper.DOTS, Paper.NARROW)) rows.add(paperRow(p))
+        val notebookPapers = listOf(Paper.COLLEGE, Paper.CORNELL, Paper.MANUSCRIPT, Paper.MUSIC, Paper.TWO_COL, Paper.THREE_COL)
+        val plannerPapers = listOf(Paper.DAILY, Paper.WEEKLY, Paper.MONTHLY, Paper.ENGINEERING, Paper.HEX, Paper.ISOMETRIC)
+        rows.add(Row("More note papers...", "College ruled, Cornell, handwriting, music, columns", selected = pg.paper in notebookPapers) { sheet.list("Note papers", notebookPapers.map { paperRow(it) }) })
+        rows.add(Row("Planners and graph papers...", "Daily, weekly, monthly, engineering, hexagonal, isometric", selected = pg.paper in plannerPapers) { sheet.list("Planners and graph papers", plannerPapers.map { paperRow(it) }) })
         val spacings = listOf(5f, 6f, 7f, 8f, 9.5f, 12f, 15f)
         rows.add(Row("Spacing of lines and squares", "%.1f mm".format(mmOf(pg.spacing))) {
             sheet.list("Spacing", spacings.map { mm ->
@@ -964,6 +992,7 @@ class NotesActivity : Activity(), InkView.Host {
             Row("Shortcut zooms to", if (s.zoomSquares) "Fixed squares of the page" else "The spot I tap") {
                 sheet.choose("Shortcut zooms to", listOf("The spot I tap" to false, "Fixed squares of the page" to true), s.zoomSquares) { s.zoomSquares = it; saveToolSettings() }
             },
+            Row("After erasing, go back to my pen", onOff(s.autoDeselectEraser)) { s.autoDeselectEraser = !s.autoDeselectEraser; saveToolSettings(); showSettings() },
             Row("Move along while zoomed in", onOff(s.autoAdvance) + " - lift the pen near the right edge and the page slides over") { s.autoAdvance = !s.autoAdvance; saveToolSettings(); showSettings() },
             Row("Keep the screen on", onOff(prefs.getBoolean("keepAwake", false))) {
                 val on = !prefs.getBoolean("keepAwake", false)
@@ -1210,7 +1239,7 @@ class NotesActivity : Activity(), InkView.Host {
                     "rec_stop" -> if (AudioNotes.active != null) stopRecording()
                     "play" -> note.recordings.firstOrNull { it.id == i.getIntExtra("id", 1) }?.let { startPlayback(it, i.getIntExtra("from", 0)) }
                     "play_stop" -> stopPlaybackUi()
-                    "replay" -> { replayOn = i.getBooleanExtra("v", true); updatePlayUi() }
+                    "replay" -> { replayMode = i.getIntExtra("v", 1); updatePlayUi() }
                     "seek" -> { AudioNotes.seekTo(i.getIntExtra("ms", 0)); updatePlayUi() }
                     "audio_state" -> Log.d("InkDebug", "audio recs=" + note.recordings.joinToString { "#${it.id}:${it.durationMs}ms ${AudioNotes.fileOf(this@NotesActivity, it).length()}B" } +
                         " active=${AudioNotes.active?.id} playing=${AudioNotes.playing?.id} pos=${AudioNotes.positionMs()} isPlaying=${AudioNotes.isPlaying}")

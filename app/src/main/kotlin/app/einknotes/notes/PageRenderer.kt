@@ -47,6 +47,9 @@ class PageRenderer(private val forExport: Boolean = false) {
         colorFilter = android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix().apply { setSaturation(0f) })
     }
 
+    private val majorPaint = Paint().apply { color = Color.rgb(140, 140, 140); strokeWidth = 2.2f; isAntiAlias = false }
+    private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(110, 110, 110) }
+    private val boxPaint = Paint().apply { color = Color.rgb(120, 120, 120); style = Paint.Style.STROKE; strokeWidth = 2f }
     private val tapeFill = Paint().apply { color = Color.rgb(205, 205, 205); style = Paint.Style.FILL }
     private val tapeHatch = Paint().apply { color = Color.rgb(150, 150, 150); strokeWidth = 2f; isAntiAlias = false }
     private val tapeEdge = Paint().apply { color = Color.rgb(90, 90, 90); style = Paint.Style.STROKE; strokeWidth = 3f }
@@ -99,6 +102,120 @@ class PageRenderer(private val forExport: Boolean = false) {
                     for (k in 0..4) c.drawLine(l + 50f * scale, top + k * gap, r - 50f * scale, top + k * gap, linePaint)
                     top += 4 * gap + 110f * scale
                 }
+            }
+            Paper.COLLEGE -> {
+                var y = t + 120f * scale
+                while (y < b - 20f * scale) { c.drawLine(l, y, r, y, linePaint); y += step }
+                val m = l + 0.12f * page.w * scale
+                c.drawLine(m, t, m, b, majorPaint)
+                c.drawLine(l, t + 120f * scale - step, r, t + 120f * scale - step, majorPaint)
+            }
+            Paper.ENGINEERING -> {
+                val fine = step / 2f
+                var i = 0; var y = t
+                while (y < b) { c.drawLine(l, y, r, y, if (i % 5 == 0) majorPaint else linePaint); y += fine; i++ }
+                i = 0; var x = l
+                while (x < r) { c.drawLine(x, t, x, b, if (i % 5 == 0) majorPaint else linePaint); x += fine; i++ }
+            }
+            Paper.HEX -> {
+                val rad = step * 0.62f
+                val w = rad * 1.7320508f; val rowH = rad * 1.5f
+                var row = 0; var cy = t + rad
+                while (cy < b + rad) {
+                    var cx = l + (if (row % 2 == 0) w / 2f else w)
+                    while (cx < r + w) {
+                        for (k in 0 until 6) {
+                            val a0 = Math.toRadians(60.0 * k - 30.0); val a1 = Math.toRadians(60.0 * (k + 1) - 30.0)
+                            val x0 = cx + rad * Math.cos(a0).toFloat(); val y0 = cy + rad * Math.sin(a0).toFloat()
+                            val x1 = cx + rad * Math.cos(a1).toFloat(); val y1 = cy + rad * Math.sin(a1).toFloat()
+                            if (x0 in l..r && x1 in l..r && y0 in t..b && y1 in t..b) c.drawLine(x0, y0, x1, y1, linePaint)
+                        }
+                        cx += w
+                    }
+                    cy += rowH; row++
+                }
+            }
+            Paper.ISOMETRIC -> {
+                val rowH = step * 0.8660254f
+                var row = 0; var y = t + rowH
+                while (y < b) {
+                    var x = l + (if (row % 2 == 0) step else step / 2f)
+                    while (x < r) { c.drawCircle(x, y, 2.2f * max(scale, 0.6f), dotPaint); x += step }
+                    y += rowH; row++
+                }
+            }
+            Paper.TWO_COL, Paper.THREE_COL -> {
+                val cols = if (page.paper == Paper.TWO_COL) 2 else 3
+                val top = t + 0.07f * page.h * scale
+                c.drawLine(l + 40f * scale, top, r - 40f * scale, top, majorPaint)
+                for (k in 1 until cols) { val x = l + page.w * scale * k / cols; c.drawLine(x, top, x, b - 40f * scale, linePaint) }
+            }
+            Paper.MANUSCRIPT -> {
+                val mid = step * 0.5f
+                var y = t + 100f * scale
+                while (y + 2 * step < b - 20f * scale) {
+                    c.drawLine(l + 40f * scale, y, r - 40f * scale, y, linePaint)                     // ascender line
+                    var x = l + 40f * scale
+                    while (x < r - 40f * scale) { c.drawLine(x, y + mid, minOf(x + 10f * scale, r - 40f * scale), y + mid, linePaint); x += 20f * scale }   // dashed middle line
+                    c.drawLine(l + 40f * scale, y + step, r - 40f * scale, y + step, majorPaint)       // baseline
+                    y += step * 2.2f
+                }
+            }
+            Paper.DAILY -> {
+                val ml = l + 50f * scale; val mr = r - 50f * scale
+                val split = l + page.w * scale * 0.62f
+                labelPaint.textSize = 30f * scale
+                c.drawText("Daily planner", ml, t + 90f * scale, labelPaint)
+                c.drawText("Date", split + 20f * scale, t + 90f * scale, labelPaint)
+                c.drawLine(split + 100f * scale, t + 92f * scale, mr, t + 92f * scale, linePaint)
+                val top = t + 150f * scale
+                c.drawText("Schedule", ml, top, labelPaint)
+                var y = top + 30f * scale; var hour = 6
+                val hStep = (b - 80f * scale - y) / 16f
+                for (i in 0 until 16) {
+                    c.drawLine(ml, y, split - 20f * scale, y, linePaint)
+                    labelPaint.textSize = 22f * scale; c.drawText("%02d".format(hour + i), ml, y + hStep * 0.8f, labelPaint)
+                    y += hStep
+                }
+                labelPaint.textSize = 30f * scale
+                c.drawText("Top priorities", split + 20f * scale, top, labelPaint)
+                var py = top + 70f * scale
+                for (i in 0 until 4) { c.drawLine(split + 20f * scale, py, mr, py, linePaint); py += 60f * scale }
+                c.drawText("To do", split + 20f * scale, py + 30f * scale, labelPaint)
+                py += 100f * scale
+                while (py < b - 80f * scale) { c.drawRect(split + 20f * scale, py - 26f * scale, split + 46f * scale, py, boxPaint); c.drawLine(split + 60f * scale, py, mr, py, linePaint); py += 56f * scale }
+            }
+            Paper.WEEKLY -> {
+                val ml = l + 40f * scale; val mr = r - 40f * scale
+                labelPaint.textSize = 30f * scale
+                c.drawText("Weekly planner", ml, t + 80f * scale, labelPaint)
+                val days = listOf("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Notes")
+                val top = t + 120f * scale; val bottom = b - 40f * scale
+                val cellH = (bottom - top) / 4f; val cellW = (mr - ml) / 2f
+                labelPaint.textSize = 24f * scale
+                for (i in 0 until 8) {
+                    val cx = ml + (i % 2) * cellW; val cy = top + (i / 2) * cellH
+                    c.drawRect(cx, cy, cx + cellW, cy + cellH, boxPaint)
+                    c.drawText(days[i], cx + 14f * scale, cy + 34f * scale, labelPaint)
+                    var ly = cy + 90f * scale
+                    while (ly < cy + cellH - 10f * scale) { c.drawLine(cx + 14f * scale, ly, cx + cellW - 14f * scale, ly, linePaint); ly += step * 0.75f }
+                }
+            }
+            Paper.MONTHLY -> {
+                val ml = l + 40f * scale; val mr = r - 40f * scale
+                labelPaint.textSize = 30f * scale
+                c.drawText("Month", ml, t + 80f * scale, labelPaint)
+                val top = t + 150f * scale; val bottom = b - 300f * scale
+                val cw = (mr - ml) / 7f; val rh = (bottom - top) / 6f
+                labelPaint.textSize = 22f * scale
+                val dn = listOf("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+                for (i in 0 until 7) c.drawText(dn[i], ml + i * cw + 10f * scale, top - 12f * scale, labelPaint)
+                for (rr in 0..6) c.drawLine(ml, top + rr * rh, mr, top + rr * rh, boxPaint)
+                for (cc in 0..7) c.drawLine(ml + cc * cw, top, ml + cc * cw, bottom, boxPaint)
+                labelPaint.textSize = 28f * scale
+                c.drawText("Goals", ml, bottom + 60f * scale, labelPaint); c.drawText("Tasks", ml + (mr - ml) * 0.5f, bottom + 60f * scale, labelPaint)
+                var gy = bottom + 100f * scale
+                while (gy < b - 40f * scale) { c.drawLine(ml, gy, ml + (mr - ml) * 0.45f, gy, linePaint); c.drawLine(ml + (mr - ml) * 0.5f, gy, mr, gy, linePaint); gy += 50f * scale }
             }
             Paper.DOTS -> {
                 var y = t + step

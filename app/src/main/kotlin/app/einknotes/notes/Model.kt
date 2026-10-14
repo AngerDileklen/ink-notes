@@ -22,7 +22,10 @@ enum class Tool { PEN, HIGHLIGHTER, CALLIGRAPHY, ERASER, SELECT, SHAPE, HAND, TE
 enum class Brush { PEN, HIGHLIGHTER, CALLIGRAPHY }
 
 enum class Paper(val label: String) {
-    BLANK("blank"), RULED("ruled"), GRID("squares (grid)"), DOTS("dots"), NARROW("narrow ruled"), CORNELL("Cornell notes"), MUSIC("music staff");
+    BLANK("blank"), RULED("ruled"), GRID("squares (grid)"), DOTS("dots"), NARROW("narrow ruled"), CORNELL("Cornell notes"), MUSIC("music staff"),
+    // added later: stored by position, so new ones always go at the end
+    ENGINEERING("engineering grid"), HEX("hexagonal grid"), ISOMETRIC("isometric dots"), TWO_COL("two columns"), THREE_COL("three columns"),
+    DAILY("daily planner"), WEEKLY("weekly planner"), MONTHLY("monthly planner"), COLLEGE("college ruled"), MANUSCRIPT("handwriting practice");
 
     fun next() = values()[(ordinal + 1) % values().size]
 }

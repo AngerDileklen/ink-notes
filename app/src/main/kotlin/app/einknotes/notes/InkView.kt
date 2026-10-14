@@ -36,7 +36,7 @@ class ToolSettings {
     var calFlat = 0.75f
     /** Hold the pen still at the end of a stroke and it becomes a clean shape. */
     var shapeSnap = true
-    var snapHoldMs = 600L
+    var snapHoldMs = 500L
     /** Which shape the Shape tool draws. */
     var shapeTool = UserShape.RECT
     /** Eraser: remove whole strokes, or only the part under the eraser. */
@@ -57,6 +57,8 @@ class ToolSettings {
     var autoAdvance = true
     /** The highlighter snaps to the text lines of a PDF page. */
     var textSnap = true
+    /** After erasing, switch back to the tool used before the eraser. */
+    var autoDeselectEraser = false
 }
 
 /** How far the pen position moves toward the real position at each sample, for smoothing off / light / strong. */
@@ -85,6 +87,8 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         fun onTextRequested(x: Float, y: Float, existing: TextItem?)
         /** Zoom or scroll position changed. */
         fun onViewChanged() {}
+        /** An erase gesture with the Eraser tool just ended. */
+        fun onEraserDone() {}
     }
 
     // ---- state -------------------------------------------------------------------------------
@@ -172,6 +176,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     /** While a recording is replayed with "Replay" on, items of that recording written after [replayMs] stay hidden. */
     private var replayRec = 0
     private var replayMs = 0
+    private var replayHide = false
     /** Tapping an item with the Hand tool while a recording plays jumps the audio to when it was written. */
     var onSeekItem: ((Item) -> Unit)? = null
     private var handDownX = 0f
@@ -180,9 +185,10 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private fun futureItems(): List<Item>? =
         if (replayRec > 0) page.items.filter { it.recId == replayRec && it.recMs > replayMs } else null
 
-    fun setReplay(rec: Int, ms: Int) {
-        val before = futureItems()?.size ?: -1
-        replayRec = rec; replayMs = ms
+    /** [hide] true: later items are not drawn at all; false: they are drawn pale. */
+    fun setReplay(rec: Int, ms: Int, hide: Boolean = true) {
+        val before = (futureItems()?.size ?: -1) + if (hide != replayHide) 10_000 else 0
+        replayRec = rec; replayMs = ms; replayHide = hide
         val after = futureItems()?.size ?: -1
         if (before != after) rebuild()
     }
@@ -541,6 +547,44 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         rebuild(); host.onSelectionChanged()
     }
 
+    private fun restoreOrder(pg: PageData, order: List<Item>) { pg.items.clear(); pg.items.addAll(order) }
+
+    /** Moves the selected items in front of (or behind) everything else on the page. */
+    fun arrangeSelection(front: Boolean) {
+        if (selection.isEmpty()) return
+        val pg = page; val before = pg.items.toList(); val sel = before.filter { s -> selection.any { it === s } }
+        val rest = before.filter { s -> selection.none { it === s } }
+        val after = if (front) rest + sel else sel + rest
+        if (after == before) return
+        restoreOrder(pg, after)
+        push(Cmd.Custom(pg, { restoreOrder(pg, before) }, { restoreOrder(pg, after) }))
+        host.onDocumentChanged(); rebuild()
+    }
+
+    /** Mirrors the selected items left-right or up-down around the middle of the selection. */
+    fun flipSelection(horizontal: Boolean) {
+        if (selection.isEmpty()) return
+        var l = Float.MAX_VALUE; var t = Float.MAX_VALUE; var r = -Float.MAX_VALUE; var b = -Float.MAX_VALUE
+        for (it in selection) { l = min(l, it.minX); t = min(t, it.minY); r = max(r, it.maxX); b = max(b, it.maxY) }
+        val m = Matrix()
+        if (horizontal) m.setScale(-1f, 1f, (l + r) / 2f, (t + b) / 2f) else m.setScale(1f, -1f, (l + r) / 2f, (t + b) / 2f)
+        for (it in selection) it.transform(m)
+        push(Cmd.Transform(page, selection.toList(), m))
+        host.onDocumentChanged(); rebuild(); host.onSelectionChanged()
+    }
+
+    /** Changes the grey of the selected strokes, shapes and text (0 black .. 255 white). */
+    fun setSelectionGray(g: Int) {
+        val targets = selection.filter { it is Stroke || it is ShapeItem || it is TextItem }
+        if (targets.isEmpty()) return
+        val old = targets.map { when (it) { is Stroke -> it.gray; is ShapeItem -> it.gray; is TextItem -> it.gray; else -> 0 } }
+        fun apply(values: List<Int>) { for ((i, it) in targets.withIndex()) when (it) { is Stroke -> it.gray = values[i]; is ShapeItem -> it.gray = values[i]; is TextItem -> { it.gray = values[i]; it.recomputeBounds() } } }
+        val new = targets.map { g }
+        apply(new)
+        push(Cmd.Custom(page, { apply(old) }, { apply(new) }))
+        host.onDocumentChanged(); rebuild()
+    }
+
     /** Copies of the selected items, for the clipboard. */
     fun copySelection(): List<Item> = selection.map { it.copy() }
 
@@ -695,6 +739,13 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         val future = futureItems()
         val hide = if (future == null) dragged else if (dragged == null) future else future + dragged
         renderer.drawItems(c, page, scale, tx, ty, hide)
+        if (future != null && !replayHide && future.isNotEmpty()) {
+            // not yet reached in the recording: drawn pale
+            val set = future.toSet()
+            c.saveLayerAlpha(null, 80)
+            for (item in page.items) if (item in set && (dragged == null || item !in dragged)) renderer.drawItem(c, item, scale, tx, ty)
+            c.restore()
+        }
         invalidate()
     }
 
@@ -1255,6 +1306,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     private fun endErase() {
         erasing = false
+        if (tool == Tool.ERASER && settings.autoDeselectEraser) post { host.onEraserDone() }
         if (partialDirty) {
             val before = eraseBefore; val after = page.items.toList(); val pg = page
             push(Cmd.Custom(pg, { pg.items.clear(); pg.items.addAll(before) }, { pg.items.clear(); pg.items.addAll(after) }))
