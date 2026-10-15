@@ -8,3 +8,8 @@ reports/
 
 # built from data on the SSD by scripts/build_dict.py
 app/src/main/assets/dict.db
+.kotlin/
+keystore.properties
+*.jks
+*.keystore
+.DS_Store

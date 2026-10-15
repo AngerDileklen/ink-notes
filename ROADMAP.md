@@ -1,7 +1,7 @@
 # Ink Notes roadmap
 
 Goal: a Notability-class note-taking app for the Hanvon N10 e-ink tablet (pen-only, Android 11).
-Source of truth for *what Notability does*: `clipbrain-ios/research/notability-teardown/REPORT.md`.
+Reference for what a Notability-class app does: public feature descriptions and our own testing; no Notability code or assets are used.
 Rule: e-ink first. No animation, no colour dependence, few and small screen updates, everything reachable with the pen.
 
 Status: DONE / NEXT / LATER / SKIP (with reason)

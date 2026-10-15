@@ -4,8 +4,6 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <!-- Lets the probe list installed packages (vendor e-ink services, the maker's own notes app). -->
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <!-- Audio notes: record a lecture while writing. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -19,7 +17,6 @@
         android:icon="@android:drawable/sym_def_app_icon"
         android:label="Ink Notes"
         android:requestLegacyExternalStorage="true"
-        android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
         <!-- The front door: all notebooks. Also receives PDFs sent from a file manager ("Open with", Share). -->

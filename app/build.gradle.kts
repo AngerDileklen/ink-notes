@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -16,11 +18,30 @@ android {
         versionName = "0.19.0-reader"
     }
 
+    // Release signing comes from keystore.properties (never committed; see keystore.properties.example).
+    val keystoreFile = rootProject.file("keystore.properties")
+    val keystoreProps = Properties().apply { if (keystoreFile.exists()) keystoreFile.inputStream().use { load(it) } }
+    signingConfigs {
+        if (keystoreFile.exists()) create("release") {
+            storeFile = file(keystoreProps.getProperty("storeFile"))
+            storePassword = keystoreProps.getProperty("storePassword")
+            keyAlias = keystoreProps.getProperty("keyAlias")
+            keyPassword = keystoreProps.getProperty("keyPassword")
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
         }
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
+        }
     }
+
+    // Targeting 29 is deliberate (simple file access on e-ink tablets that stay on Android 9-11); this app is sideloaded, not on Google Play.
+    lint { disable += "ExpiredTargetSdkVersion" }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
