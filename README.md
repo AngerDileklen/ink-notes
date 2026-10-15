@@ -15,7 +15,12 @@ No animations, no ghosting-prone effects, no account, no cloud. Your pen, your p
 
 </div>
 
-<!-- screenshots: add docs/screenshots/*.png and list them here -->
+<p align="center">
+  <img src="docs/screenshots/notebook.png" width="30%" alt="A notebook page with pen, shapes and highlighter">
+  <img src="docs/screenshots/paper.png" width="30%" alt="Paper types and page sizes">
+  <img src="docs/screenshots/settings.png" width="30%" alt="Settings for e-ink refresh and pen behaviour">
+</p>
+<p align="center"><sub>Captured on the Hanvon N10. Large targets, no animation, one refresh per action.</sub></p>
 
 ## Why
 
