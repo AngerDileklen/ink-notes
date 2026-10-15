@@ -80,10 +80,6 @@ Signed release: copy `keystore.properties.example` to `keystore.properties`, fil
 
 For USB testing, debug builds accept `adb shell am broadcast -a app.einknotes.DEBUG --es cmd <command>` (see `NotesActivity.registerDebugControl`). These hooks are absent from release builds.
 
-## Related
-
-**[Ink Drop](https://github.com/AngerDileklen/ink-drop)** sends files between the tablet, a Mac and an iPhone over Bluetooth plus a private Wi-Fi link, with no shared network. Books it receives show up in Ink Notes automatically.
-
 ## Contributing
 
 Pull requests and bug reports are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Third-party components: [NOTICE.md](NOTICE.md).
