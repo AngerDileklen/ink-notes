@@ -9,8 +9,24 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>dev.hanvon.ink</groupId>
   <artifactId>ink-sdk</artifactId>
-  <version>0.2.0-rc1</version>
+  <version>0.2.1</version>
   <packaging>aar</packaging>
+  <name>Hanvon Ink SDK</name>
+  <description>Experimental native ink preview and retained-stroke support for compatible Hanvon firmware</description>
+  <url>https://github.com/jdkruzr/hanvon-ink-sdk</url>
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <scm>
+    <connection>scm:git:https://github.com/jdkruzr/hanvon-ink-sdk.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/jdkruzr/hanvon-ink-sdk.git</developerConnection>
+    <tag>v0.2.1</tag>
+    <url>https://github.com/jdkruzr/hanvon-ink-sdk</url>
+  </scm>
   <dependencies>
     <dependency>
       <groupId>org.jetbrains.kotlin</groupId>

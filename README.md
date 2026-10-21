@@ -6,12 +6,12 @@
 
 No animations, no ghosting-prone effects, no account, no cloud. Your pen, your pages, your device.
 
-[![Latest release](https://img.shields.io/github/v/release/AngerDileklen/ink-notes?style=flat-square)](../../releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/AngerDileklen/ink-notes?style=flat-square)](https://github.com/AngerDileklen/ink-notes/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-black?style=flat-square)](LICENSE)
 ![Android 9+](https://img.shields.io/badge/Android-9%2B-black?style=flat-square)
 ![No tracking](https://img.shields.io/badge/tracking-none-black?style=flat-square)
 
-[**Download the APK**](../../releases/latest) · [Privacy](PRIVACY.md) · [Roadmap](ROADMAP.md)
+[**Download the APK**](https://github.com/AngerDileklen/ink-notes/releases/latest) · [Privacy](PRIVACY.md) · [Roadmap](ROADMAP.md)
 
 </div>
 
@@ -46,11 +46,13 @@ Most note apps assume an LCD that redraws sixty times a second. On an e-ink scre
 
 ## Experimental native ink
 
-This branch integrates an independent Hanvon native-ink SDK with retained pressure widths and temporary pen tools. See [setup, compatibility and validation status](docs/native-ink.md). `assembleSandbox` builds **Ink Notes Native Test**, which installs beside the original app.
+This branch integrates the independent [Hanvon Ink SDK](https://github.com/jdkruzr/hanvon-ink-sdk) (Apache-2.0) with retained pressure widths and temporary pen tools. See [setup, compatibility and validation status](docs/native-ink.md). `assembleSandbox` builds **Ink Notes Native Test**, which installs beside the original app.
+
+[Download the experimental native-ink APK](https://github.com/jdkruzr/ink-notes/releases/tag/native-ink-v0.2.1). This is a debug-signed prerelease, physically tested on the M10 / Penstar eNote Pro (Android 14). The regular release linked below remains the upstream author's build.
 
 ## Install
 
-1. On your tablet open the [latest release](../../releases/latest) and download `ink-notes.apk`.
+1. On your tablet open the [latest release](https://github.com/AngerDileklen/ink-notes/releases/latest) and download `ink-notes.apk`.
 2. Open it. If Android asks, allow installing apps from your browser or file manager.
 3. Launch **Ink Notes**.
 

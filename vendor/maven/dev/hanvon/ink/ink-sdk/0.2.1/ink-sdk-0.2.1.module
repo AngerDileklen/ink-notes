@@ -3,7 +3,7 @@
   "component": {
     "group": "dev.hanvon.ink",
     "module": "ink-sdk",
-    "version": "0.2.0-rc1",
+    "version": "0.2.1",
     "attributes": {
       "org.gradle.status": "release"
     }
@@ -33,13 +33,13 @@
       ],
       "files": [
         {
-          "name": "ink-sdk-0.2.0-rc1.aar",
-          "url": "ink-sdk-0.2.0-rc1.aar",
-          "size": 80400,
-          "sha512": "d90b81a28a368f9fead11aeb8bfabe59d54af931de454c19d74bc5a12666e348164cc782d735a3aa6c6bec0603f861dde85f054c9d0d36dc0210234c223364fc",
-          "sha256": "c2c1f9b22f8be46f2058560226cb7eaf7eb5e1a11e2278a81c8c791f94b3ecb1",
-          "sha1": "ba41f6afd757240b2116cc9179b48f05d8d80ded",
-          "md5": "03642668fb92115092415245a6588a98"
+          "name": "ink-sdk-0.2.1.aar",
+          "url": "ink-sdk-0.2.1.aar",
+          "size": 86220,
+          "sha512": "769c782a7849c1917f868af3060bd30f7d891d2630a3c3e1f1abae31f047040e28b649e6c3e07f6b3487b02ecfc44e275a8ffb898df9833f68cb8f4329ae1e12",
+          "sha256": "229715de52ee85d7091259e73326d8162af4a9c3d8efd224d09c737da1f51aa5",
+          "sha1": "1f03751709377d119fb8b1768ef1ab8a75b85bf6",
+          "md5": "df3738aeb19c11d788099e3dc164da09"
         }
       ]
     },
@@ -62,13 +62,13 @@
       ],
       "files": [
         {
-          "name": "ink-sdk-0.2.0-rc1.aar",
-          "url": "ink-sdk-0.2.0-rc1.aar",
-          "size": 80400,
-          "sha512": "d90b81a28a368f9fead11aeb8bfabe59d54af931de454c19d74bc5a12666e348164cc782d735a3aa6c6bec0603f861dde85f054c9d0d36dc0210234c223364fc",
-          "sha256": "c2c1f9b22f8be46f2058560226cb7eaf7eb5e1a11e2278a81c8c791f94b3ecb1",
-          "sha1": "ba41f6afd757240b2116cc9179b48f05d8d80ded",
-          "md5": "03642668fb92115092415245a6588a98"
+          "name": "ink-sdk-0.2.1.aar",
+          "url": "ink-sdk-0.2.1.aar",
+          "size": 86220,
+          "sha512": "769c782a7849c1917f868af3060bd30f7d891d2630a3c3e1f1abae31f047040e28b649e6c3e07f6b3487b02ecfc44e275a8ffb898df9833f68cb8f4329ae1e12",
+          "sha256": "229715de52ee85d7091259e73326d8162af4a9c3d8efd224d09c737da1f51aa5",
+          "sha1": "1f03751709377d119fb8b1768ef1ab8a75b85bf6",
+          "md5": "df3738aeb19c11d788099e3dc164da09"
         }
       ]
     },
@@ -82,13 +82,13 @@
       },
       "files": [
         {
-          "name": "ink-sdk-0.2.0-rc1-sources.jar",
-          "url": "ink-sdk-0.2.0-rc1-sources.jar",
-          "size": 14601,
-          "sha512": "41f4fcf6fae024c671d9173f796da22890e8a1775da1218e84bb26c396262352e8daa6e32495c4fb9350369af7d4acda6012fcb9eba3f0a58f89ea3c490e26f9",
-          "sha256": "904510994db469331aa2c89d4ac7dfdfa15e7c1baf68b9a4c87c7f7ff196f50b",
-          "sha1": "e88d3de691956c9b09474d1234a2d02ab1f8af7e",
-          "md5": "84d49057e961e26e7baf424169107fe6"
+          "name": "ink-sdk-0.2.1-sources.jar",
+          "url": "ink-sdk-0.2.1-sources.jar",
+          "size": 19343,
+          "sha512": "2f3d607155d189e1b88207e6eb0dce823bd7998f2a22a46568981234a2e974c344e22244afe6dc27b358856b71febee760530a5badc7c87cc9a1ac32d013eae7",
+          "sha256": "5b2d07fbf6bd629d8305e400d7f48dd70a0193a8fb806f5c360b4f7f9972de34",
+          "sha1": "d96d0601d2d9cfcae3e56542ea79bb6ada7450b2",
+          "md5": "be991200db8751b598d12ac0f1b20d88"
         }
       ]
     }

@@ -100,8 +100,8 @@ notebook; both pages were rendered and visually checked with native pen, marker
 and backgrounds present. Restart, Home/return, sleep/wake, all four orientations,
 split-screen Android fallback/fullscreen native recovery and stock Notes coexistence
 passed. The independent Ink Lab consumer also passed pressure/retention, Clear and
-center exclusion on/off. The local integration now consumes SDK 0.2.0; final library
-bytecode matches physically tested SDK rc3.
+center exclusion on/off. The local integration now consumes Apache-licensed SDK 0.2.1; compiled library
+code matches physically tested SDK rc3.
 
 Only the M10 has physical acceptance. Numeric pen-to-visible-ink latency, other
 Hanvon devices, color panels and other marker shades/widths have not been validated.
