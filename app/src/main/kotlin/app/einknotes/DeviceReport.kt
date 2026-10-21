@@ -188,7 +188,7 @@ object DeviceReport {
             for (pkg in pkgs) {
                 try {
                     val pi = pm.getPackageInfo(pkg, flags)
-                    val ai = pi.applicationInfo
+                    val ai = pi.applicationInfo ?: continue
                     out.append("--- $pkg v${pi.versionName} system=${ai.flags and ApplicationInfo.FLAG_SYSTEM != 0}\n")
                     out.append("    apk=${ai.sourceDir} size=${File(ai.sourceDir).length() / 1024}KB\n")
                     File(ai.nativeLibraryDir).list()?.let { out.append("    native libs: ${it.sorted().joinToString()}\n") }

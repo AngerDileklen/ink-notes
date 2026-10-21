@@ -9,13 +9,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- Ink Drop (the file-sharing app) hands received books to the Books tab; only apps signed with our key may. -->
     <permission
-        android:name="app.einknotes.permission.ADD_BOOKS"
+        android:name="${applicationId}.permission.ADD_BOOKS"
         android:protectionLevel="signature" />
 
     <application
         android:allowBackup="false"
         android:icon="@android:drawable/sym_def_app_icon"
-        android:label="Ink Notes"
+        android:label="${inkAppLabel}"
         android:requestLegacyExternalStorage="true"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
@@ -25,7 +25,7 @@
             android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"
             android:exported="true"
             android:launchMode="singleTop"
-            android:label="Ink Notes">
+            android:label="${inkAppLabel}">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -48,7 +48,7 @@
             android:name=".notes.NotesActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"
             android:exported="true"
-            android:label="Ink Notes" />
+            android:label="${inkAppLabel}" />
 
         <!-- The reading library; also receives ebook files from a file manager. -->
         <activity
@@ -77,7 +77,7 @@
         <receiver
             android:name=".reader.BookDropReceiver"
             android:exported="true"
-            android:permission="app.einknotes.permission.ADD_BOOKS">
+            android:permission="${applicationId}.permission.ADD_BOOKS">
             <intent-filter>
                 <action android:name="app.einknotes.ADD_BOOK" />
             </intent-filter>

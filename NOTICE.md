@@ -4,6 +4,7 @@ Ink Notes' own code is MIT-licensed (see `LICENSE`). The released APK also conta
 
 | Component | Use | Licence |
 |---|---|---|
+| [Hanvon Ink SDK](https://github.com/jdkruzr/hanvon-ink-sdk) | Native ink preview, pressure samples and session lifecycle | [Apache-2.0](vendor/HANVON-INK-SDK-LICENSE); [notice](vendor/HANVON-INK-SDK-NOTICE) |
 | [PdfiumAndroid (io.legere:pdfiumandroid)](https://github.com/johngray1965/PdfiumAndroidKt) with Google's PDFium | PDF text search and selection | Apache-2.0 |
 | [Princeton WordNet 3.0](https://wordnet.princeton.edu/license-and-commercial-use) | English meanings in the offline dictionary | WordNet licence (permissive, attribution) |
 | [WikDict](https://www.wikdict.com) en-tr / tr-en (from Wiktionary) | English-Turkish translations in the offline dictionary | CC BY-SA 3.0 |

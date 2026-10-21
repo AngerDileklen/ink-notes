@@ -81,6 +81,7 @@ class NotesActivity : Activity(), InkView.Host {
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var note: NoteData
     private lateinit var ink: InkView
+    private var nativeInk: NativeInkController? = null
     private lateinit var pdfs: PdfLibrary
     private lateinit var importPanel: LinearLayout
     private lateinit var importText: TextView
@@ -132,11 +133,12 @@ class NotesActivity : Activity(), InkView.Host {
     )
     private var presetIndex = 1          // AutoDU > GC16 felt best on this tablet
     private var polish = false
-    private var inFast = false
+    private var writingMode: String? = null
 
     private val settleToQuality = Runnable {
+        if (::ink.isInitialized && ink.nativeDrawing) return@Runnable
         val quality = presets[presetIndex].third ?: return@Runnable
-        inFast = false
+        writingMode = null
         eink.set(quality, "pen idle") {
             if (polish) ink.takePolishRect()?.let { r -> ink.invalidate(r) } else ink.takePolishRect()
         }
@@ -177,6 +179,9 @@ class NotesActivity : Activity(), InkView.Host {
         pdfText = PdfTextEngine(this, pdfs)
         ink.pdfText = pdfText
         ink.sideButtonTool = Tool.values().getOrElse(prefs.getInt("side", Tool.ERASER.ordinal)) { Tool.ERASER }
+        ink.secondaryButtonTool = Tool.values().getOrElse(prefs.getInt("side2", Tool.SELECT.ordinal)) { Tool.SELECT }
+        ink.fingerPan = prefs.getBoolean("fingerPan", false)
+        ink.nativePreferred = prefs.getBoolean("nativeInk", true)
         loadToolSettings()
 
         buildScreen()
@@ -188,6 +193,19 @@ class NotesActivity : Activity(), InkView.Host {
         registerDebugControl()
         handleIncoming(intent)
         ready = true
+        nativeInk = NativeInkController(this, ink, eink, excluded = {
+            if (contextBar.visibility != View.VISIBLE || contextBar.height <= 0) null else {
+                val bar = IntArray(2); val canvas = IntArray(2)
+                contextBar.getLocationOnScreen(bar); ink.getLocationOnScreen(canvas)
+                val left = (bar[0] - canvas[0]).toFloat().coerceIn(0f, ink.width.toFloat())
+                val top = (bar[1] - canvas[1]).toFloat().coerceIn(0f, ink.height.toFloat())
+                dev.hanvon.ink.InkRect(left, top, (left + contextBar.width).coerceAtMost(ink.width.toFloat()),
+                    (top + contextBar.height).coerceAtMost(ink.height.toFloat()))
+            }
+        }) {
+            sheet.isShowing || pagesPanel.visibility == View.VISIBLE || studyPanel.visibility == View.VISIBLE ||
+                importPanel.visibility == View.VISIBLE || AudioNotes.playing != null || retired
+        }
     }
 
     // ---- screen ------------------------------------------------------------------------------
@@ -295,7 +313,7 @@ class NotesActivity : Activity(), InkView.Host {
     private fun updateContext() {
         when {
             AudioNotes.playing != null -> showContext(playBar)
-            ink.tool == Tool.SELECT && (ink.hasSelection || Clipboard.items.isNotEmpty()) -> showContext(selectionBar)
+            ink.hasSelection || (ink.tool == Tool.SELECT && Clipboard.items.isNotEmpty()) -> showContext(selectionBar)
             ink.zoomed -> showContext(zoomBar)
             else -> showContext(null)
         }
@@ -573,7 +591,7 @@ class NotesActivity : Activity(), InkView.Host {
     private fun noteViewChange() {
         val every = prefs.getInt("cleanEvery", 8)
         if (every <= 0) return
-        if (++viewChanges >= every) { viewChanges = 0; ui.postDelayed({ if (!isFinishing) eink.fullRefresh() }, 500) }
+        if (++viewChanges >= every) { viewChanges = 0; ui.postDelayed({ if (!isFinishing) refreshScreen() }, 500) }
     }
 
     override fun onViewChanged() {
@@ -865,7 +883,7 @@ class NotesActivity : Activity(), InkView.Host {
             Row("Audio recordings", if (note.recordings.isEmpty()) "None yet" else "${note.recordings.size}") { showRecordings() },
             Row("Export as PDF", "Saved to Download/Ink Notes") { exportPdf() },
             Row("Delete this page", "Page ${ink.pageIndex + 1} of ${note.pages.size}") { confirmDeletePage() },
-            Row("Clean screen", "One full refresh to clear ghosting") { eink.fullRefresh() },
+            Row("Clean screen", "One full refresh to clear ghosting") { refreshScreen() },
             Row("Settings") { showSettings() },
             Row("Back to library") { save(); finish() }
         ))
@@ -977,10 +995,30 @@ class NotesActivity : Activity(), InkView.Host {
         }
     }
 
+    private fun refreshScreen() { nativeInk?.refresh() ?: eink.fullRefresh() }
+
     private fun showSettings() {
         val s = ink.settings
         val sideOrder = listOf(Tool.ERASER, Tool.SELECT, Tool.HAND, Tool.HIGHLIGHTER, Tool.PEN)
         sheet.list("Settings", listOf(
+            Row("Hanvon native ink", onOff(ink.nativePreferred) + " · " + ink.nativeStatus) {
+                ink.nativePreferred = !ink.nativePreferred
+                prefs.edit().putBoolean("nativeInk", ink.nativePreferred).apply(); nativeInk?.sync(); showSettings()
+            },
+            Row("Use native pressure pen", "Black pressure pen; disables shape snap, smoothing and ruler") {
+                ink.invalidateNative(); ink.nativePreferred = true; ink.settings.penFixed = false; ink.settings.penGray = 0
+                ink.settings.shapeSnap = false; ink.settings.smoothing = 0; ink.rulerOn = false
+                prefs.edit().putBoolean("nativeInk", true).apply(); saveToolSettings(); selectTool(Tool.PEN); nativeInk?.sync()
+            },
+            Row("Native pen compatibility", "Black pen; shape snap, smoothing and ruler use Android ink.", enabled = false) {},
+            Row("Middle pen button", ink.secondaryButtonTool.name.lowercase()) {
+                sheet.choose("While the middle button is held", sideOrder.map { it.name.lowercase() to it }, ink.secondaryButtonTool) {
+                    ink.secondaryButtonTool = it; prefs.edit().putInt("side2", it.ordinal).apply()
+                }
+            },
+            Row("Finger input pans", onOff(ink.fingerPan) + " · touchscreen only; pen-as-finger always pans") {
+                ink.fingerPan = !ink.fingerPan; prefs.edit().putBoolean("fingerPan", ink.fingerPan).apply(); showSettings()
+            },
             Row("Fast ink while writing", presets[presetIndex].first) {
                 sheet.choose("Fast ink while writing", presets.mapIndexed { i, p -> p.first to i }, presetIndex) {
                     presetIndex = it; prefs.edit().putInt("preset", it).apply(); if (it == 0) eink.restore()
@@ -988,7 +1026,7 @@ class NotesActivity : Activity(), InkView.Host {
             },
             Row("Redraw cleanly after writing", onOff(polish)) { polish = !polish; prefs.edit().putBoolean("polish", polish).apply(); showSettings() },
             Row("Hold pen still to snap shapes", onOff(s.shapeSnap)) { s.shapeSnap = !s.shapeSnap; saveToolSettings(); showSettings() },
-            Row("Pen side button", ink.sideButtonTool.name.lowercase().replaceFirstChar { it.uppercase() }) {
+            Row("Bottom pen button", ink.sideButtonTool.name.lowercase().replaceFirstChar { it.uppercase() }) {
                 sheet.choose("While the side button is held", sideOrder.map { it.name.lowercase().replaceFirstChar { c -> c.uppercase() } to it }, ink.sideButtonTool) {
                     ink.sideButtonTool = it; prefs.edit().putInt("side", it.ordinal).apply()
                 }
@@ -1069,12 +1107,26 @@ class NotesActivity : Activity(), InkView.Host {
 
     override fun onPenDown() {
         ui.removeCallbacks(settleToQuality)
+        if (ink.nativeDrawing) return
         if (sheet.isShowing) sheet.hide()
         val fast = presets[presetIndex].second ?: return
-        if (!inFast) { inFast = true; eink.set(fast, "pen down") }
+        // AUTO_DU can threshold pale marker ink to white until the later quality redraw.
+        val mode = when {
+            ink.needsGrayEditWaveform -> EinkController.A2_DITHER
+            ink.needsGrayscaleWaveform -> EinkController.PART_GC16
+            else -> fast
+        }
+        if (writingMode != mode) {
+            writingMode = mode
+            eink.set(mode, "pen down") {
+                // The first Android frame may have preceded the asynchronous mode change.
+                if (!ink.nativeDrawing && (ink.needsGrayscaleWaveform || ink.needsGrayEditWaveform)) ink.invalidate()
+            }
+        }
     }
 
     override fun onPenUp() {
+        if (ink.nativeDrawing) return
         if (presets[presetIndex].second == null) return
         ui.removeCallbacks(settleToQuality)
         ui.postDelayed(settleToQuality, 700)
@@ -1160,11 +1212,36 @@ class NotesActivity : Activity(), InkView.Host {
     }
 
     // The panel mode is system-wide, so always hand it back when we leave.
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus); nativeInk?.sync()
+    }
+
+    override fun onResume() {
+        super.onResume(); if (ready) ink.post { nativeInk?.resume() }
+    }
+
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        if (ready) nativeInk?.beforeInput(event)
+        val handled = super.dispatchTouchEvent(event)
+        if (ready) nativeInk?.afterInput(event)
+        return handled
+    }
+
+    override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+        if (ready) nativeInk?.genericInput(event)
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    override fun onMultiWindowModeChanged(inMultiWindow: Boolean, newConfig: android.content.res.Configuration) {
+        super.onMultiWindowModeChanged(inMultiWindow, newConfig); nativeInk?.sync()
+    }
+
     override fun onPause() {
+        nativeInk?.pause()
         eink.restoreNow()
         if (!ready) { super.onPause(); return }
         ui.removeCallbacks(settleToQuality); ui.removeCallbacks(saveNow)
-        inFast = false
+        writingMode = null
         val changed = dirty
         save()
         if (changed && !retired) try { Thumbnailer.save(note.pages[0], pdfs, 360, File(file.parentFile, "$notebookName.png")) } catch (_: Throwable) { }
@@ -1172,6 +1249,7 @@ class NotesActivity : Activity(), InkView.Host {
     }
 
     override fun onDestroy() {
+        nativeInk?.destroy(); nativeInk = null
         debugReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) { } }
         debugReceiver = null
         if (live === this) live = null
@@ -1195,6 +1273,11 @@ class NotesActivity : Activity(), InkView.Host {
             override fun onReceive(c: Context, i: Intent) {
                 val cmd = i.getStringExtra("cmd") ?: return
                 when (cmd) {
+                    "nativepen" -> {
+                        ink.invalidateNative(); ink.nativePreferred = true; ink.settings.penFixed = false; ink.settings.penGray = 0
+                        ink.settings.shapeSnap = false; ink.settings.smoothing = 0; ink.rulerOn = false
+                        prefs.edit().putBoolean("nativeInk", true).apply(); saveToolSettings(); selectTool(Tool.PEN); nativeInk?.sync()
+                    }
                     "tool_pen" -> selectTool(Tool.PEN)
                     "tool_marker" -> selectTool(Tool.HIGHLIGHTER)
                     "tool_calli" -> { selectTool(Tool.PEN); ink.tool = Tool.CALLIGRAPHY; selectTool(Tool.CALLIGRAPHY) }

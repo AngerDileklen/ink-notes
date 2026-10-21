@@ -1,0 +1,96 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "dev.hanvon.ink",
+    "module": "ink-sdk",
+    "version": "0.2.1",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.9"
+    }
+  },
+  "variants": [
+    {
+      "name": "releaseVariantReleaseApiPublication",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.libraryelements": "aar",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencies": [
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "2.0.21"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "ink-sdk-0.2.1.aar",
+          "url": "ink-sdk-0.2.1.aar",
+          "size": 86220,
+          "sha512": "769c782a7849c1917f868af3060bd30f7d891d2630a3c3e1f1abae31f047040e28b649e6c3e07f6b3487b02ecfc44e275a8ffb898df9833f68cb8f4329ae1e12",
+          "sha256": "229715de52ee85d7091259e73326d8162af4a9c3d8efd224d09c737da1f51aa5",
+          "sha1": "1f03751709377d119fb8b1768ef1ab8a75b85bf6",
+          "md5": "df3738aeb19c11d788099e3dc164da09"
+        }
+      ]
+    },
+    {
+      "name": "releaseVariantReleaseRuntimePublication",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.libraryelements": "aar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "2.0.21"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "ink-sdk-0.2.1.aar",
+          "url": "ink-sdk-0.2.1.aar",
+          "size": 86220,
+          "sha512": "769c782a7849c1917f868af3060bd30f7d891d2630a3c3e1f1abae31f047040e28b649e6c3e07f6b3487b02ecfc44e275a8ffb898df9833f68cb8f4329ae1e12",
+          "sha256": "229715de52ee85d7091259e73326d8162af4a9c3d8efd224d09c737da1f51aa5",
+          "sha1": "1f03751709377d119fb8b1768ef1ab8a75b85bf6",
+          "md5": "df3738aeb19c11d788099e3dc164da09"
+        }
+      ]
+    },
+    {
+      "name": "releaseVariantReleaseSourcePublication",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "ink-sdk-0.2.1-sources.jar",
+          "url": "ink-sdk-0.2.1-sources.jar",
+          "size": 19343,
+          "sha512": "2f3d607155d189e1b88207e6eb0dce823bd7998f2a22a46568981234a2e974c344e22244afe6dc27b358856b71febee760530a5badc7c87cc9a1ac32d013eae7",
+          "sha256": "5b2d07fbf6bd629d8305e400d7f48dd70a0193a8fb806f5c360b4f7f9972de34",
+          "sha1": "d96d0601d2d9cfcae3e56542ea79bb6ada7450b2",
+          "md5": "be991200db8751b598d12ac0f1b20d88"
+        }
+      ]
+    }
+  ]
+}

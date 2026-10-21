@@ -1,5 +1,7 @@
 name: build
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -8,4 +10,4 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
       - run: chmod +x gradlew
-      - run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+      - run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleSandbox

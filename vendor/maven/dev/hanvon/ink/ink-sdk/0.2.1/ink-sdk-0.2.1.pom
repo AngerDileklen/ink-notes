@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd" xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <!-- This module was also published with a richer model, Gradle metadata,  -->
+  <!-- which should be used instead. Do not delete the following line which  -->
+  <!-- is to indicate to Gradle or any Gradle module metadata file consumer  -->
+  <!-- that they should prefer consuming it instead. -->
+  <!-- do_not_remove: published-with-gradle-metadata -->
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>dev.hanvon.ink</groupId>
+  <artifactId>ink-sdk</artifactId>
+  <version>0.2.1</version>
+  <packaging>aar</packaging>
+  <name>Hanvon Ink SDK</name>
+  <description>Experimental native ink preview and retained-stroke support for compatible Hanvon firmware</description>
+  <url>https://github.com/jdkruzr/hanvon-ink-sdk</url>
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <scm>
+    <connection>scm:git:https://github.com/jdkruzr/hanvon-ink-sdk.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/jdkruzr/hanvon-ink-sdk.git</developerConnection>
+    <tag>v0.2.1</tag>
+    <url>https://github.com/jdkruzr/hanvon-ink-sdk</url>
+  </scm>
+  <dependencies>
+    <dependency>
+      <groupId>org.jetbrains.kotlin</groupId>
+      <artifactId>kotlin-stdlib</artifactId>
+      <version>2.0.21</version>
+      <scope>compile</scope>
+    </dependency>
+  </dependencies>
+</project>

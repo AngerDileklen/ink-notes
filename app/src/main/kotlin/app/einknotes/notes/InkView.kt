@@ -11,6 +11,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.SystemClock
+import dev.hanvon.ink.*
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
@@ -93,11 +94,113 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         fun onEraserDone() {}
     }
 
+    // Native integration is an adapter: the SDK owns firmware; this View owns document transactions.
+    var nativeSession: InkSession? = null
+    var nativeDrawing = false
+    var nativePreferred = true
+    var secondaryButtonTool = Tool.SELECT
+    var fingerPan = false
+    var onNativeInvalidated: (() -> Unit)? = null
+    var nativeStatus = "Android ink"
+    fun nativeTool(tool: Tool) = tool == Tool.PEN || tool == Tool.HIGHLIGHTER
+    val nativeEligible get() = nativePreferred && nativeTool(tool) && (tool == Tool.HIGHLIGHTER || settings.penGray == 0) &&
+        !settings.shapeSnap && settings.smoothing == 0 && !rulerOn && !panning &&
+        (!writing || nativeCurrent) &&
+        selection.isEmpty() && (gestureTool == null || gestureTool == tool) && nativeWidth in 1..64
+    val nativeWidth get() = (if (tool == Tool.HIGHLIGHTER) HIGHLIGHTER_WIDTH * settings.hlWidth * scale
+        else (if (settings.penFixed) 3.6f else 6f) * settings.penWidth * scale).roundToInt()
+    val nativeBrush get() = if (tool == Tool.HIGHLIGHTER || settings.penFixed) NativeBrush.PENCIL else NativeBrush.PRESSURE_PEN
+    // Stock monochrome Notes uses color 3 for its black marker and 4 for lighter marker shades.
+    val nativePreviewColor get() = if (tool != Tool.HIGHLIGHTER) NativePreviewColor.BLACK
+        else if (settings.hlGray <= 170) NativePreviewColor.DARK_GRAY else NativePreviewColor.LIGHT_GRAY
+    val nativeArea get() = InkRect(tx.coerceIn(0f, width.toFloat()), ty.coerceIn(0f, height.toFloat()),
+        (tx + page.w * scale).coerceIn(0f, width.toFloat()), (ty + page.h * scale).coerceIn(0f, height.toFloat()))
+    private var gestureTool: Tool? = null
+    /** Gray Android ink needs a waveform that preserves intermediate shades while drawing. */
+    val needsGrayscaleWaveform get() = when (gestureTool ?: tool) {
+        Tool.HIGHLIGHTER -> true
+        Tool.PEN -> settings.penGray in 1..254
+        Tool.CALLIGRAPHY -> settings.calGray in 1..254
+        else -> false
+    }
+    val needsGrayEditWaveform get() = (gestureTool ?: tool) == Tool.ERASER &&
+        page.items.any { it is Stroke && it.gray in 1..254 }
+    private var nativeId = 0L
+    private var nativeCurrent = false
+    private var nativeToken = -1L
+    private val nativeCapture = StrokeCapture()
+    private data class PendingNative(val stroke: Stroke, val page: PageData, val scale: Float, val tx: Float, val ty: Float)
+    private val nativePending = linkedMapOf<Long, PendingNative>()
+    private data class NativeFrame(val owner: InkSession, val token: Long, val clearPreview: Boolean)
+    private var nativeFrame: NativeFrame? = null
+    private var retainedRedraw: (() -> Unit)? = null
+    /** The controller keeps native drawing suspended until this edited Android frame is submitted. */
+    fun afterRetainedRedraw(committed: () -> Unit) { retainedRedraw = committed; rebuild() }
+    private val finishNative = Runnable { finishNativeCapture() }
+    private fun finishNativeCapture(force: Boolean = false) {
+        val results = nativeCapture.finish(SystemClock.elapsedRealtimeNanos(), force)
+        if (results.isEmpty()) return
+        var clearPreview = false
+        results.forEach { result ->
+            val pending = nativePending.remove(result.id)
+            val rendered = result.stroke
+            val accepted = pending != null && rendered != null && pending.page === page && pending.page.items.any { it === pending.stroke }
+            if (accepted) {
+                checkNotNull(pending); checkNotNull(rendered)
+                if (pending.stroke.brush == Brush.HIGHLIGHTER) {
+                    // Native marker accelerates preview. Keep the app's editable highlighter
+                    // path and original Android pressure samples; native packets contain no pressure.
+                    // The gray preview is approximate, so always clear it after the retained frame.
+                    clearPreview = true
+                } else {
+                    val points = rendered.transformed(1f / pending.scale, -pending.tx / pending.scale, -pending.ty / pending.scale).points
+                    pending.stroke.apply {
+                        brush = Brush.NATIVE_WIDTH; widthScale = 1f
+                        renderedWidths = points.map { it.width }.toFloatArray()
+                        xs = points.map { it.x }.toFloatArray(); ys = points.map { it.y }.toFloatArray()
+                        ps = FloatArray(0); recomputeBounds()
+                    }
+                }
+                host.onDocumentChanged()
+            } else clearPreview = true
+            Log.i("NativeInk", "stroke=${result.id} accepted=$accepted reason=${result.reason}")
+            if (rendered == null) nativeStatus = "Android recovery ink: ${result.reason}"
+        }
+        nativeSession?.let { nativeFrame = NativeFrame(it, nativeToken, clearPreview) }
+        rebuild()
+    }
+    fun receiveNative(stroke: RenderedStroke, arrivalNanos: Long) { nativeCapture.offer(stroke, arrivalNanos) }
+    /** Invalidate before edits, viewport changes or ownership loss; provisional ink is already retained. */
+    fun invalidateNative() {
+        removeCallbacks(finishNative)
+        if (nativeCurrent) {
+            nativeCapture.end(nativeId, SystemClock.elapsedRealtimeNanos())
+            if (writing) endStroke()
+            nativeCurrent = false; painter = null; gestureTool = null
+        }
+        if (nativePending.isNotEmpty()) finishNativeCapture(force = true)
+        nativeCapture.clear(); nativePending.clear(); nativeFrame = null
+        onNativeInvalidated?.invoke()
+    }
+    fun inputTool(event: MotionEvent): Tool? {
+        val input = PenInput.classify(event.getToolType(0), event.buttonState, event.source)
+        return when {
+            input.tool == PenSignal.REAR_ERASER -> Tool.ERASER
+            input.tool == PenSignal.PEN_AS_FINGER -> Tool.HAND
+            input.tool == PenSignal.FINGER -> if (fingerPan) Tool.HAND else null
+            input.primary -> sideButtonTool
+            input.secondary -> secondaryButtonTool
+            input.tertiary -> Tool.HAND
+            else -> tool
+        }
+    }
+
     // ---- state -------------------------------------------------------------------------------
 
     var pageIndex = 0
         private set
     var tool = Tool.PEN
+        set(value) { if (field != value) invalidateNative(); field = value }
     /** What the pen's side button does while it is held. */
     var sideButtonTool = Tool.ERASER
     val settings = ToolSettings()
@@ -291,6 +394,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     }
 
     fun goToPage(i: Int) {
+        invalidateNative()
         if (i !in note.pages.indices || i == pageIndex) return
         clearSelection()
         hitRects = emptyList()
@@ -302,6 +406,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     }
 
     fun addPageAfterCurrent() {
+        invalidateNative()
         clearSelection()
         note.pages.add(pageIndex + 1, blankPageLike(page))
         pageIndex += 1
@@ -313,6 +418,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     /** Puts [list] after the current page and jumps to the first of them. */
     fun insertPagesAfterCurrent(list: List<PageData>) {
+        invalidateNative()
         if (list.isEmpty()) return
         clearSelection()
         note.pages.addAll(pageIndex + 1, list)
@@ -325,6 +431,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     /** Inserts [list] at [index] and shows the first of them. */
     fun insertPagesAt(index: Int, list: List<PageData>) {
+        invalidateNative()
         if (list.isEmpty()) return
         clearSelection()
         note.pages.addAll(index.coerceIn(0, note.pages.size), list)
@@ -339,6 +446,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     fun deleteCurrentPage() = deletePageAt(pageIndex)
 
     fun deletePageAt(i: Int) {
+        invalidateNative()
         if (i !in note.pages.indices) return
         clearSelection()
         val removed = note.pages[i]
@@ -358,6 +466,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     /** Moves page [from] so that it ends up at position [to]. The page you are looking at stays in view. */
     fun movePage(from: Int, to: Int) {
+        invalidateNative()
         if (from !in note.pages.indices || to !in note.pages.indices || from == to) return
         val current = page
         val p = note.pages.removeAt(from)
@@ -368,6 +477,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     /** A full copy of page [i] (background and everything on it), placed right after it. */
     fun duplicatePage(i: Int) {
+        invalidateNative()
         if (i !in note.pages.indices) return
         val src = note.pages[i]
         val copy = PageData(src.paper)
@@ -401,6 +511,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     /** Changes the proportions of a plain page (writing stays where it is, measured from the top left). */
     fun setPageSize(s: PageSize) {
+        invalidateNative()
         if (page.isPdf) return
         page.h = page.w * s.ratio
         fitToView(keepZoom = true)
@@ -435,6 +546,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     /** Keeps the page point under the middle of the view fixed. */
     private fun setZoomCentered(rel: Float) {
+        invalidateNative()
         if (Math.abs(rel - zoomRel) < 0.001f) return
         val cx = width / 2f; val cy = height / 2f
         val px = (cx - tx) / scale; val py = (cy - ty) / scale
@@ -449,6 +561,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     /** Zooms in on the page point under view position (vx, vy): centred there, or onto the fixed square it lies in. */
     fun zoomAt(vx: Float, vy: Float, rel: Float) {
+        invalidateNative()
         val px = (vx - tx) / scale; val py = (vy - ty) / scale
         zoomRel = rel.coerceAtLeast(1f)
         scale = fit * zoomRel
@@ -466,7 +579,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     }
 
     /** Back to the whole page. */
-    fun zoomOut() { zoomRel = 1f; fitToView(keepZoom = true); transformChanged(); rebuild(); host.onViewChanged() }
+    fun zoomOut() { invalidateNative(); zoomRel = 1f; fitToView(keepZoom = true); transformChanged(); rebuild(); host.onViewChanged() }
 
     /** The zoom shortcut: zoomed out -> zoom in where the pen is; zoomed in -> back to the whole page. */
     fun toggleZoomAt(vx: Float, vy: Float) {
@@ -475,6 +588,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     }
 
     fun panBy(dxFraction: Float, dyFraction: Float) {
+        invalidateNative()
         tx -= dxFraction * width; ty -= dyFraction * height
         clampOffsets()
         transformChanged()
@@ -485,6 +599,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     // ---- undo / redo -------------------------------------------------------------------------
 
     fun undo() {
+        invalidateNative()
         val cmd = undoStack.removeLastOrNull() ?: return
         clearSelection()
         when (cmd) {
@@ -498,6 +613,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     }
 
     fun redo() {
+        invalidateNative()
         val cmd = redoStack.removeLastOrNull() ?: return
         clearSelection()
         when (cmd) {
@@ -608,6 +724,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     // ---- layout / transform ------------------------------------------------------------------
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        invalidateNative()
         if (w <= 0 || h <= 0) return
         bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         bmpCanvas = Canvas(bitmap!!)
@@ -662,6 +779,18 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         tapePreview?.let { canvas.drawRect(it, selDash) }
         for (h in hitRects) canvas.drawRect(tx + h.left * scale - 4f, ty + h.top * scale - 4f, tx + h.right * scale + 4f, ty + h.bottom * scale + 4f, hitPaint)
         if (rulerOn) drawRuler(canvas)
+        nativeFrame?.let { (owner, token, clearPreview) ->
+            nativeFrame = null
+            if (debuggable) Log.d("NativeInk", "retainedDraw token=$token hardware=${canvas.isHardwareAccelerated}")
+            RetainedFrame.afterDraw(this, canvas) { signal ->
+                if (debuggable) Log.d("NativeInk", "retainedCommit token=$token signal=$signal")
+                if (nativeSession === owner) owner.notifyFrameCommitted(token, clearPreview)
+            }
+        }
+        retainedRedraw?.let { done ->
+            retainedRedraw = null
+            RetainedFrame.afterDraw(this, canvas) { done() }
+        }
     }
 
     private fun drawRuler(c: Canvas) {
@@ -760,6 +889,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     /** The page moved, zoomed or changed: the PDF background needs rendering again. */
     private fun transformChanged() {
+        invalidateNative()
         if (!page.isPdf) return
         val name = page.pdfFile ?: return
         if (width <= 0 || height <= 0) return
@@ -795,17 +925,23 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         val virtual = e.device?.name == "Virtual" || e.deviceId < 0
         if (virtual && SystemClock.uptimeMillis() < ignoreVirtualUntil) return true
         val toolType = e.getToolType(0)
-        if (toolType == MotionEvent.TOOL_TYPE_FINGER) return true   // this tablet has no finger touch; ignore strays
-
-        val active = when {
-            toolType == MotionEvent.TOOL_TYPE_ERASER -> Tool.ERASER
-            toolType == 6 -> sideButtonTool                          // pen tool type while the side button is held
-            else -> tool
-        }
+        if (!fingerPan && PenInput.classify(toolType, e.buttonState, e.source).tool == PenSignal.FINGER) return true
+        val active = (if (e.actionMasked == MotionEvent.ACTION_DOWN) inputTool(e) else gestureTool ?: inputTool(e)) ?: return true
+        if (debuggable && e.actionMasked == MotionEvent.ACTION_DOWN)
+            Log.d("NativeInk", "tool=$active buttons=${e.buttonState} items=${page.items.size}")
 
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                gestureTool = active
+                if (!nativeTool(active)) invalidateNative()
                 host.onPenDown()
+                nativeCurrent = nativeDrawing && nativeTool(active) && nativeEligible && nativeSession != null
+                if (nativeCurrent) {
+                    removeCallbacks(finishNative); nativeId++
+                    nativeCurrent = nativeCapture.begin(nativeId, InputClock.eventNanos(e), InkPoint(e.x, e.y))
+                    if (nativeCurrent) nativeToken = nativeSession!!.observe(e)
+                    else { nativeSession?.suspendDrawing(); nativeStatus = "Android recovery ink: capture budget exceeded" }
+                }
                 lastVx = e.x; lastVy = e.y
                 removeCallbacks(advance)
                 if (hitRects.isNotEmpty()) { hitRects = emptyList(); invalidate() }
@@ -839,10 +975,19 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                 }
             }
             MotionEvent.ACTION_MOVE -> {
+                if (nativeCurrent) {
+                    for (i in 0 until e.historySize) nativeCapture.add(nativeId, InkPoint(e.getHistoricalX(i), e.getHistoricalY(i)))
+                    nativeCapture.add(nativeId, InkPoint(e.x, e.y)); nativeSession?.observe(e)
+                }
                 for (i in 0 until e.historySize) move(e.getHistoricalX(i), e.getHistoricalY(i), e.getHistoricalPressure(i))
                 move(e.x, e.y, e.pressure)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val endedNative = nativeCurrent
+                if (endedNative) {
+                    nativeCapture.add(nativeId, InkPoint(e.x, e.y)); nativeCapture.end(nativeId, InputClock.eventNanos(e))
+                    nativeToken = nativeSession?.observe(e) ?: -1L
+                }
                 var zoomTrigger = false
                 var wasTap = false
                 if (e.actionMasked == MotionEvent.ACTION_UP && tapEligible) {
@@ -893,6 +1038,11 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                     clearSelection()
                     toggleZoomAt(e.x, e.y)
                 }
+                nativeCurrent = false; gestureTool = null
+                if (endedNative) {
+                    if (e.actionMasked == MotionEvent.ACTION_CANCEL || zoomTrigger) invalidateNative()
+                    else postDelayed(finishNative, 1050)
+                } else if (nativePending.isNotEmpty()) postDelayed(finishNative, 1050)
                 host.onPenUp()
             }
         }
@@ -928,6 +1078,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     private fun autoAdvance(x: Float) {
         if (!zoomed || !settings.autoAdvance || x < width * 0.82f) return
+        invalidateNative()
         val minTx = width - page.w * scale
         if (tx > minTx + 4f) {
             tx = max(minTx, tx - (x - width * 0.10f))      // the last ink lands about 10% from the left edge
@@ -1025,11 +1176,12 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     private fun pushPoint(x: Float, y: Float, p: Float) {
         liveXs.add((x - tx) / scale); liveYs.add((y - ty) / scale); livePs.add(p)
-        painter?.add(x, y, p)
+        if (!nativeCurrent) painter?.add(x, y, p)
     }
 
     /** Repaints just the little area the newest pieces of ink touched. */
     private fun flushLive() {
+        if (nativeCurrent) return
         if (brush == Brush.HIGHLIGHTER) { updateHighlighter(); return }
         val d = painter?.dirty ?: return
         painter?.dirty = null
@@ -1056,7 +1208,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private fun endStroke() {
         removeCallbacks(holdCheck)
         val snapped = snappedShape
-        if (snapped == null) { painter?.finish(); flushLive() }   // a replaced stroke must not draw any more ink
+        if (snapped == null && !nativeCurrent) { painter?.finish(); flushLive() }   // a replaced stroke must not draw any more ink
         painter = null
         writing = false
         rSide = 0
@@ -1091,6 +1243,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
             val s = Stroke(brush, grayFor(brush), widthFor(brush), liveXs.toArray(), liveYs.toArray(), livePs.toArray(),
                 settings.calAngle, settings.calFlat)
             stamp(s, strokeMs)
+            if (nativeCurrent) nativePending[nativeId] = PendingNative(s, page, scale, tx, ty)
             page.items.add(s)
             push(Cmd.Add(page, listOf(s)))
             host.onDocumentChanged()
@@ -1309,6 +1462,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     private fun endErase() {
         erasing = false
+        if (debuggable) Log.d("NativeInk", "erase removed=${erased.size} partial=$partialDirty remaining=${page.items.size}")
         if (tool == Tool.ERASER && settings.autoDeselectEraser) post { host.onEraserDone() }
         if (partialDirty) {
             val before = eraseBefore; val after = page.items.toList(); val pg = page
@@ -1406,6 +1560,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
                 }
                 selMode = SelMode.NONE
                 lasso.reset(); lassoPts.clear()
+                if (debuggable) Log.d("NativeInk", "lasso selected=${selection.size} items=${page.items.size}")
                 invalidate(); host.onSelectionChanged()
             }
             SelMode.MOVE, SelMode.SCALE -> {

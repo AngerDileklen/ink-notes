@@ -280,7 +280,16 @@ class PageRenderer(private val forExport: Boolean = false) {
         c.drawRect(r, tapeEdge)
     }
 
+    private val nativeRenderer = dev.hanvon.ink.RenderedInkRenderer()
     private fun drawStroke(c: Canvas, s: Stroke, scale: Float, tx: Float, ty: Float) {
+        if (s.brush == Brush.NATIVE_WIDTH) {
+            val widths = s.renderedWidths!!
+            val stroke = dev.hanvon.ink.RenderedStroke(s.xs.indices.map {
+                dev.hanvon.ink.RenderedPoint(s.xs[it], s.ys[it], widths[it] * s.widthScale)
+            })
+            nativeRenderer.draw(c, stroke, Color.rgb(s.gray, s.gray, s.gray), scale, tx, ty)
+            return
+        }
         if (s.brush == Brush.HIGHLIGHTER) {
             drawHighlighter(c, highlighterPath(s.xs, s.ys, s.n, scale, tx, ty), s.gray, HIGHLIGHTER_WIDTH * s.widthScale * scale, s.n == 1)
             return

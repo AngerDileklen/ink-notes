@@ -7,11 +7,13 @@ plugins {
 
 android {
     namespace = "app.einknotes"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "app.einknotes"
+        manifestPlaceholders["inkAppLabel"] = "Ink Notes"
         minSdk = 28
+        testInstrumentationRunner = "app.einknotes.notes.NativeIntegrationInstrumentation"
         // The tablet runs Android 11. Targeting 29 keeps simple file access for the probe's report.
         targetSdk = 29
         versionCode = 24
@@ -34,6 +36,13 @@ android {
         debug {
             isMinifyEnabled = false
         }
+        create("sandbox") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".nativeink"
+            versionNameSuffix = "-sandbox"
+            manifestPlaceholders["inkAppLabel"] = "Ink Notes Native Test"
+            matchingFallbacks += "debug"
+        }
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release")
@@ -52,7 +61,18 @@ android {
     }
 }
 
+// Fork builds coexist with upstream; do not reserve upstream version numbers.
+androidComponents {
+    onVariants(selector().withBuildType("sandbox")) { variant ->
+        variant.outputs.forEach { output ->
+            output.versionCode.set(33)
+            output.versionName.set("0.20.0-native-sdk0.2.1-sandbox")
+        }
+    }
+}
+
 dependencies {
+    implementation("dev.hanvon.ink:ink-sdk:0.2.1")
     // PDF text (search, selection, highlight along text lines). Drawing stays on Android's PdfRenderer.
     implementation("io.legere:pdfiumandroid:1.0.32")
     testImplementation("junit:junit:4.13.2")
