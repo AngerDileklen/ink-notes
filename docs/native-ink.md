@@ -10,7 +10,9 @@ reported-width samples and preview handoff. No vendor binaries are bundled.
 On supported firmware, open Settings and choose **Use native pressure pen**. This
 selects black pen ink and disables smoothing, shape snapping and the ruler, whose
 output cannot match the native preview. The fixed-width pen uses the native pencil
-style instead. Other brushes and unsupported configurations retain Android drawing.
+style instead. Marker also uses native style 15 with a gray preview when the current
+settings and 1..64 display-pixel width bound allow it. Other brushes and unsupported
+configurations retain Android drawing.
 The native status in Settings explains the current path.
 
 Bottom and middle button defaults are temporary erase and select. Hold middle to
@@ -33,6 +35,13 @@ the SDK conservatively associates native samples with the input transaction. An
 accepted result replaces that same stroke object's geometry and actual width
 diameters, preserving undo identity. Missing or ambiguous packets retain Android
 ink and report fallback. Native packet timing is not per-point sampling time.
+
+Marker uses the native service for preview but keeps its original Android-input
+highlighter geometry and pressure samples for editing and storage. The firmware's
+dark/light gray codes approximate the chosen marker shade. Its retained redraw
+always clears native preview; only matching black pen strokes skip that reset.
+Changing tools explicitly restores black preview color for Pen. No native pressure
+is fabricated for a marker packet.
 
 Width-bearing strokes are stored as version-8 item type 6. They carry actual
 diameters, not fabricated pressure. Copies, transformations, erasing, rendering,
@@ -78,5 +87,25 @@ The first editing trial exposed stale native preview despite a successful docume
 erase. An idle-frame callback regression reproduced the failure on the emulator;
 the corrected build passed it. On-device retest with SDK alpha06 confirmed that
 both the bottom button and rear eraser now visibly erase the retained stroke.
-Middle lasso/move, pen triple-tap zoom, top pan and resumed writing then passed physical retest. The rc1 emulator fixture also passed PDF import, annotation, export, rendered-pixel verification and notebook reopen. Physical PDF annotation and final candidate lifecycle acceptance remain pending.
-This document does not claim a final 0.2 release or numerical pen-to-ink latency.
+Middle lasso/move, pen triple-tap zoom, top pan and resumed writing then passed physical retest.
+Physical PDF alignment, zoom/pan and partial erase/Undo passed. SDK rc2 removed
+ordinary black-ink redraw flashing while retaining visible erase cleanup. App rc4
+(SDK rc3) passed the native-marker preview and retained-redraw observation at the
+tested width/shade. App rc6 corrected partial-marker cap geometry and inherited
+display-mode handling; marker -> partial erase -> Undo -> fresh marker passed on
+the device. Return-to-pen and Settings recovery also passed.
+The emulator fixture also passed PDF import, annotation, export, rendered-pixel
+verification and notebook reopen. The device exported the real two-page test
+notebook; both pages were rendered and visually checked with native pen, marker
+and backgrounds present. Restart, Home/return, sleep/wake, all four orientations,
+split-screen Android fallback/fullscreen native recovery and stock Notes coexistence
+passed. The independent Ink Lab consumer also passed pressure/retention, Clear and
+center exclusion on/off. The local integration now consumes SDK 0.2.0; final library
+bytecode matches physically tested SDK rc3.
+
+Only the M10 has physical acceptance. Numeric pen-to-visible-ink latency, other
+Hanvon devices, color panels and other marker shades/widths have not been validated.
+Marker partial erase conservatively expands the centerline cut for square caps; it
+is stroke splitting, not a pixel mask. Native widths above 64 display pixels use
+the Android fallback, which may be slower. Missing or ambiguous native packets
+retain provisional Android strokes, so acceptance does not imply 100% association.

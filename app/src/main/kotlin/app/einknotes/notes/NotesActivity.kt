@@ -133,12 +133,12 @@ class NotesActivity : Activity(), InkView.Host {
     )
     private var presetIndex = 1          // AutoDU > GC16 felt best on this tablet
     private var polish = false
-    private var inFast = false
+    private var writingMode: String? = null
 
     private val settleToQuality = Runnable {
         if (::ink.isInitialized && ink.nativeDrawing) return@Runnable
         val quality = presets[presetIndex].third ?: return@Runnable
-        inFast = false
+        writingMode = null
         eink.set(quality, "pen idle") {
             if (polish) ink.takePolishRect()?.let { r -> ink.invalidate(r) } else ink.takePolishRect()
         }
@@ -1110,7 +1110,19 @@ class NotesActivity : Activity(), InkView.Host {
         if (ink.nativeDrawing) return
         if (sheet.isShowing) sheet.hide()
         val fast = presets[presetIndex].second ?: return
-        if (!inFast) { inFast = true; eink.set(fast, "pen down") }
+        // AUTO_DU can threshold pale marker ink to white until the later quality redraw.
+        val mode = when {
+            ink.needsGrayEditWaveform -> EinkController.A2_DITHER
+            ink.needsGrayscaleWaveform -> EinkController.PART_GC16
+            else -> fast
+        }
+        if (writingMode != mode) {
+            writingMode = mode
+            eink.set(mode, "pen down") {
+                // The first Android frame may have preceded the asynchronous mode change.
+                if (!ink.nativeDrawing && (ink.needsGrayscaleWaveform || ink.needsGrayEditWaveform)) ink.invalidate()
+            }
+        }
     }
 
     override fun onPenUp() {
@@ -1229,7 +1241,7 @@ class NotesActivity : Activity(), InkView.Host {
         eink.restoreNow()
         if (!ready) { super.onPause(); return }
         ui.removeCallbacks(settleToQuality); ui.removeCallbacks(saveNow)
-        inFast = false
+        writingMode = null
         val changed = dirty
         save()
         if (changed && !retired) try { Thumbnailer.save(note.pages[0], pdfs, 360, File(file.parentFile, "$notebookName.png")) } catch (_: Throwable) { }

@@ -52,9 +52,30 @@ class EinkController(ctx: Context) {
     @Volatile private var nativeOwner = false
     private val revision = java.util.concurrent.atomic.AtomicInteger()
     private val operationLock = Any()
-    fun nativeOwnership(owned: Boolean) {
-        if (nativeOwner == owned) return
-        synchronized(operationLock) { nativeOwner = owned; revision.incrementAndGet() }
+    fun nativeOwnership(owned: Boolean, ready: (() -> Unit)? = null) {
+        if (nativeOwner == owned) {
+            if (owned && ready != null) {
+                val requestedRevision = revision.get()
+                worker.execute { ui.post { if (nativeOwner && revision.get() == requestedRevision) ready() } }
+            }
+            return
+        }
+        val requestedRevision = synchronized(operationLock) { nativeOwner = owned; revision.incrementAndGet() }
+        if (!owned) return
+        // Native pen pixels bypass the Android waveform. Retained gray marker pixels
+        // do not: they disappear if an earlier eraser left AUTO_DU selected.
+        // Establish a dithered backing-frame mode before activating native drawing.
+        worker.execute {
+            val outcome = try {
+                synchronized(operationLock) {
+                    if (!nativeOwner || revision.get() != requestedRevision) return@execute
+                    setModeM?.invoke(mgr, A2_DITHER)
+                    "native retained frames: ${nameOf(readMode())}"
+                }
+            } catch (t: Throwable) { "native retained mode failed: ${(t as? InvocationTargetException)?.cause ?: t}" }
+            synchronized(history) { history.add(outcome); if (history.size > 200) history.removeAt(0) }
+            ui.post { if (nativeOwner && revision.get() == requestedRevision) ready?.invoke() }
+        }
     }
 
     val available get() = mgr != null && setModeM != null && getModeM != null

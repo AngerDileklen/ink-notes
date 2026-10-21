@@ -139,12 +139,21 @@ class Stroke(
     fun eraseCircle(cx: Float, cy: Float, r: Float): List<Stroke>? {
         if (n == 0 || !near(cx, cy, r)) return null
         if (n == 1) return if (hit(cx, cy, r)) emptyList() else null
+        // Splitting a marker creates square caps that extend beyond the centerline.
+        // Keep their full diagonal outside the erased disk, including oblique cuts.
+        // This is conservative stroke splitting, not a pixel mask painted over the page.
+        val cutRadius = r + if (brush == Brush.HIGHLIGHTER) HIGHLIGHTER_WIDTH * widthScale / 2f * sqrt(2f) else 0f
+        // Newly split endpoints lie on that boundary. Floating-point roundoff must
+        // not turn an identical second erase into another cut or a duplicate point.
+        if (brush == Brush.HIGHLIGHTER && (0 until n - 1).none {
+            distToSegment(cx, cy, xs[it], ys[it], xs[it + 1], ys[it + 1]) < cutRadius - .01f
+        }) return null
         val samples = renderedWidths ?: ps
         val runs = ArrayList<FloatArray>()      // each run: x,y,p triples
         var cur = ArrayList<Float>()
         var touched = false
         fun flush() { if (cur.size >= 6) runs.add(cur.toFloatArray()); cur = ArrayList() }
-        fun inside(i: Int): Boolean { val dx = xs[i] - cx; val dy = ys[i] - cy; return dx * dx + dy * dy <= r * r }
+        fun inside(i: Int): Boolean { val dx = xs[i] - cx; val dy = ys[i] - cy; return dx * dx + dy * dy <= cutRadius * cutRadius }
         for (i in 0 until n) {
             val insideNow = inside(i)
             if (i > 0) {
@@ -152,7 +161,7 @@ class Stroke(
                 val ax = xs[i - 1]; val ay = ys[i - 1]; val bx = xs[i]; val by = ys[i]
                 val dx = bx - ax; val dy = by - ay
                 val fx = ax - cx; val fy = ay - cy
-                val a = dx * dx + dy * dy; val b = 2 * (fx * dx + fy * dy); val c = fx * fx + fy * fy - r * r
+                val a = dx * dx + dy * dy; val b = 2 * (fx * dx + fy * dy); val c = fx * fx + fy * fy - cutRadius * cutRadius
                 val disc = b * b - 4 * a * c
                 if (a > 0f && disc > 0f) {
                     val sq = sqrt(disc)

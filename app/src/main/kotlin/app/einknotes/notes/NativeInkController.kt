@@ -56,7 +56,7 @@ class NativeInkController(private val activity: Activity, private val view: InkV
     fun beforeInput(event: MotionEvent) {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             val tool = view.inputTool(event) ?: return // Ignored palms must not cancel a native handoff.
-            heldTool = tool != Tool.PEN
+            heldTool = !view.nativeTool(tool)
             if (heldTool) view.invalidateNative()
             sync()
         }
@@ -117,15 +117,20 @@ class NativeInkController(private val activity: Activity, private val view: InkV
             } catch (e: Exception) { failed = true; view.nativeStatus = "Android ink: ${e.message}"; return }
         }
         val exclusion = excluded()
-        val key = "${view.display?.rotation}:${view.nativeWidth}:${view.nativeBrush}:${view.nativeArea}:$exclusion"
+        val key = "${view.display?.rotation}:${view.nativeWidth}:${view.nativeBrush}:${view.nativePreviewColor}:${view.nativeArea}:$exclusion"
         if (!active || key != configKey) {
             if (active && key != configKey) { view.invalidateNative(); return }
-            eink.nativeOwnership(true)
-            session!!.suspendDrawing()
-            session!!.setBrush(view.nativeBrush); session!!.setWidth(view.nativeWidth)
-            session!!.setBounds(view.nativeArea, exclusion)
+            val owner = session!!
+            val activationGeneration = generation
+            owner.suspendDrawing()
             configKey = key; active = true
-            session!!.setForeground(true); session!!.resumeDrawing()
+            eink.nativeOwnership(true) {
+                if (session === owner && generation == activationGeneration && active && resumed && configKey == key) {
+                    owner.setBrush(view.nativeBrush); owner.setPreviewColor(view.nativePreviewColor); owner.setWidth(view.nativeWidth)
+                    owner.setBounds(view.nativeArea, exclusion)
+                    owner.setForeground(true); owner.resumeDrawing()
+                }
+            }
         }
     }
 }

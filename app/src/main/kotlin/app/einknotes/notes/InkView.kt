@@ -102,43 +102,71 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     var fingerPan = false
     var onNativeInvalidated: (() -> Unit)? = null
     var nativeStatus = "Android ink"
-    val nativeEligible get() = nativePreferred && tool == Tool.PEN && settings.penGray == 0 &&
+    fun nativeTool(tool: Tool) = tool == Tool.PEN || tool == Tool.HIGHLIGHTER
+    val nativeEligible get() = nativePreferred && nativeTool(tool) && (tool == Tool.HIGHLIGHTER || settings.penGray == 0) &&
         !settings.shapeSnap && settings.smoothing == 0 && !rulerOn && !panning &&
         (!writing || nativeCurrent) &&
-        selection.isEmpty() && (gestureTool == null || gestureTool == Tool.PEN) && nativeWidth in 1..64
-    val nativeWidth get() = ((if (settings.penFixed) 3.6f else 6f) * settings.penWidth * scale).roundToInt()
-    val nativeBrush get() = if (settings.penFixed) NativeBrush.PENCIL else NativeBrush.PRESSURE_PEN
+        selection.isEmpty() && (gestureTool == null || gestureTool == tool) && nativeWidth in 1..64
+    val nativeWidth get() = (if (tool == Tool.HIGHLIGHTER) HIGHLIGHTER_WIDTH * settings.hlWidth * scale
+        else (if (settings.penFixed) 3.6f else 6f) * settings.penWidth * scale).roundToInt()
+    val nativeBrush get() = if (tool == Tool.HIGHLIGHTER || settings.penFixed) NativeBrush.PENCIL else NativeBrush.PRESSURE_PEN
+    // Stock monochrome Notes uses color 3 for its black marker and 4 for lighter marker shades.
+    val nativePreviewColor get() = if (tool != Tool.HIGHLIGHTER) NativePreviewColor.BLACK
+        else if (settings.hlGray <= 170) NativePreviewColor.DARK_GRAY else NativePreviewColor.LIGHT_GRAY
     val nativeArea get() = InkRect(tx.coerceIn(0f, width.toFloat()), ty.coerceIn(0f, height.toFloat()),
         (tx + page.w * scale).coerceIn(0f, width.toFloat()), (ty + page.h * scale).coerceIn(0f, height.toFloat()))
     private var gestureTool: Tool? = null
+    /** Gray Android ink needs a waveform that preserves intermediate shades while drawing. */
+    val needsGrayscaleWaveform get() = when (gestureTool ?: tool) {
+        Tool.HIGHLIGHTER -> true
+        Tool.PEN -> settings.penGray in 1..254
+        Tool.CALLIGRAPHY -> settings.calGray in 1..254
+        else -> false
+    }
+    val needsGrayEditWaveform get() = (gestureTool ?: tool) == Tool.ERASER &&
+        page.items.any { it is Stroke && it.gray in 1..254 }
     private var nativeId = 0L
     private var nativeCurrent = false
     private var nativeToken = -1L
     private val nativeCapture = StrokeCapture()
     private data class PendingNative(val stroke: Stroke, val page: PageData, val scale: Float, val tx: Float, val ty: Float)
     private val nativePending = linkedMapOf<Long, PendingNative>()
-    private var nativeFrame: Pair<InkSession, Long>? = null
+    private data class NativeFrame(val owner: InkSession, val token: Long, val clearPreview: Boolean)
+    private var nativeFrame: NativeFrame? = null
     private var retainedRedraw: (() -> Unit)? = null
     /** The controller keeps native drawing suspended until this edited Android frame is submitted. */
     fun afterRetainedRedraw(committed: () -> Unit) { retainedRedraw = committed; rebuild() }
     private val finishNative = Runnable { finishNativeCapture() }
     private fun finishNativeCapture(force: Boolean = false) {
-        nativeCapture.finish(SystemClock.elapsedRealtimeNanos(), force).forEach { result ->
+        val results = nativeCapture.finish(SystemClock.elapsedRealtimeNanos(), force)
+        if (results.isEmpty()) return
+        var clearPreview = false
+        results.forEach { result ->
             val pending = nativePending.remove(result.id)
             val rendered = result.stroke
-            if (pending != null && rendered != null && pending.page === page && pending.page.items.any { it === pending.stroke }) {
-                val points = rendered.transformed(1f / pending.scale, -pending.tx / pending.scale, -pending.ty / pending.scale).points
-                pending.stroke.apply {
-                    brush = Brush.NATIVE_WIDTH; widthScale = 1f
-                    xs = points.map { it.x }.toFloatArray(); ys = points.map { it.y }.toFloatArray()
-                    ps = FloatArray(0); renderedWidths = points.map { it.width }.toFloatArray(); recomputeBounds()
+            val accepted = pending != null && rendered != null && pending.page === page && pending.page.items.any { it === pending.stroke }
+            if (accepted) {
+                checkNotNull(pending); checkNotNull(rendered)
+                if (pending.stroke.brush == Brush.HIGHLIGHTER) {
+                    // Native marker accelerates preview. Keep the app's editable highlighter
+                    // path and original Android pressure samples; native packets contain no pressure.
+                    // The gray preview is approximate, so always clear it after the retained frame.
+                    clearPreview = true
+                } else {
+                    val points = rendered.transformed(1f / pending.scale, -pending.tx / pending.scale, -pending.ty / pending.scale).points
+                    pending.stroke.apply {
+                        brush = Brush.NATIVE_WIDTH; widthScale = 1f
+                        renderedWidths = points.map { it.width }.toFloatArray()
+                        xs = points.map { it.x }.toFloatArray(); ys = points.map { it.y }.toFloatArray()
+                        ps = FloatArray(0); recomputeBounds()
+                    }
                 }
                 host.onDocumentChanged()
-            }
-            Log.i("NativeInk", "stroke=${result.id} accepted=${rendered != null && pending != null} reason=${result.reason}")
+            } else clearPreview = true
+            Log.i("NativeInk", "stroke=${result.id} accepted=$accepted reason=${result.reason}")
             if (rendered == null) nativeStatus = "Android recovery ink: ${result.reason}"
         }
-        nativeSession?.let { nativeFrame = it to nativeToken }
+        nativeSession?.let { nativeFrame = NativeFrame(it, nativeToken, clearPreview) }
         rebuild()
     }
     fun receiveNative(stroke: RenderedStroke, arrivalNanos: Long) { nativeCapture.offer(stroke, arrivalNanos) }
@@ -751,12 +779,12 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         tapePreview?.let { canvas.drawRect(it, selDash) }
         for (h in hitRects) canvas.drawRect(tx + h.left * scale - 4f, ty + h.top * scale - 4f, tx + h.right * scale + 4f, ty + h.bottom * scale + 4f, hitPaint)
         if (rulerOn) drawRuler(canvas)
-        nativeFrame?.let { (owner, token) ->
+        nativeFrame?.let { (owner, token, clearPreview) ->
             nativeFrame = null
             if (debuggable) Log.d("NativeInk", "retainedDraw token=$token hardware=${canvas.isHardwareAccelerated}")
             RetainedFrame.afterDraw(this, canvas) { signal ->
                 if (debuggable) Log.d("NativeInk", "retainedCommit token=$token signal=$signal")
-                if (nativeSession === owner) owner.notifyFrameCommitted(token)
+                if (nativeSession === owner) owner.notifyFrameCommitted(token, clearPreview)
             }
         }
         retainedRedraw?.let { done ->
@@ -905,9 +933,9 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 gestureTool = active
-                if (active != Tool.PEN) invalidateNative()
+                if (!nativeTool(active)) invalidateNative()
                 host.onPenDown()
-                nativeCurrent = nativeDrawing && active == Tool.PEN && nativeEligible && nativeSession != null
+                nativeCurrent = nativeDrawing && nativeTool(active) && nativeEligible && nativeSession != null
                 if (nativeCurrent) {
                     removeCallbacks(finishNative); nativeId++
                     nativeCurrent = nativeCapture.begin(nativeId, InputClock.eventNanos(e), InkPoint(e.x, e.y))
@@ -1049,8 +1077,8 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
     private val advance = Runnable { autoAdvance(advanceX) }
 
     private fun autoAdvance(x: Float) {
-        invalidateNative()
         if (!zoomed || !settings.autoAdvance || x < width * 0.82f) return
+        invalidateNative()
         val minTx = width - page.w * scale
         if (tx > minTx + 4f) {
             tx = max(minTx, tx - (x - width * 0.10f))      // the last ink lands about 10% from the left edge
@@ -1153,6 +1181,7 @@ class InkView(context: Context, val note: NoteData, private val pdfs: PdfLibrary
 
     /** Repaints just the little area the newest pieces of ink touched. */
     private fun flushLive() {
+        if (nativeCurrent) return
         if (brush == Brush.HIGHLIGHTER) { updateHighlighter(); return }
         val d = painter?.dirty ?: return
         painter?.dirty = null
