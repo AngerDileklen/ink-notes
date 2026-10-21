@@ -44,6 +44,10 @@ Most note apps assume an LCD that redraws sixty times a second. On an e-ink scre
 - EPUB, PDF, FB2, TXT, HTML, CBZ comics and MOBI
 - Tap a word for an offline English and Turkish dictionary; highlights, notes, AI translation and summaries
 
+## Experimental native ink
+
+This branch integrates an independent Hanvon native-ink SDK with retained pressure widths and temporary pen tools. See [setup, compatibility and validation status](docs/native-ink.md). `assembleSandbox` builds **Ink Notes Native Test**, which installs beside the original app.
+
 ## Install
 
 1. On your tablet open the [latest release](../../releases/latest) and download `ink-notes.apk`.
@@ -62,7 +66,7 @@ No account, no analytics, no ads. Everything stays on the tablet. The only netwo
 
 ## Build from source
 
-You need a JDK 17+ and the Android SDK (API 34). Then:
+You need a JDK 17+ and the Android SDK (API 35). Then:
 
     git clone https://github.com/AngerDileklen/ink-notes.git
     cd ink-notes

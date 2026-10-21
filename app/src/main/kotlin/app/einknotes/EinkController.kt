@@ -49,6 +49,14 @@ class EinkController(ctx: Context) {
     private val worker = Executors.newSingleThreadExecutor()
     private val ui = Handler(Looper.getMainLooper())
 
+    @Volatile private var nativeOwner = false
+    private val revision = java.util.concurrent.atomic.AtomicInteger()
+    private val operationLock = Any()
+    fun nativeOwnership(owned: Boolean) {
+        if (nativeOwner == owned) return
+        synchronized(operationLock) { nativeOwner = owned; revision.incrementAndGet() }
+    }
+
     val available get() = mgr != null && setModeM != null && getModeM != null
 
     /** The mode to restore. Taken from the system the first time, and never a leftover temporary mode. */
@@ -71,12 +79,16 @@ class EinkController(ctx: Context) {
 
     /** Sets a mode on a background thread (the call crosses into the system server). Reports back on the UI thread. */
     fun set(mode: String, why: String, done: ((String) -> Unit)? = null) {
-        if (!available) { done?.invoke("e-ink interface not available"); return }
+        if (!available || nativeOwner) { done?.invoke("e-ink mode change unavailable or native-owned"); return }
+        val requestedRevision = revision.get()
         worker.execute {
+            if (nativeOwner || requestedRevision != revision.get()) return@execute
             val t0 = SystemClock.uptimeMillis()
             val outcome = try {
-                setModeM!!.invoke(mgr, mode)
-                val back = readMode()
+                val back = synchronized(operationLock) {
+                    if (nativeOwner || requestedRevision != revision.get()) return@execute
+                    setModeM!!.invoke(mgr, mode); readMode()
+                }
                 "$why: asked ${nameOf(mode)} -> now ${nameOf(back)} (${SystemClock.uptimeMillis() - t0} ms)" +
                     if (back == mode) "" else "   NOT ACCEPTED"
             } catch (t: Throwable) {
@@ -84,7 +96,7 @@ class EinkController(ctx: Context) {
                 "$why: asked ${nameOf(mode)} FAILED: $c"
             }
             synchronized(history) { history.add(outcome); if (history.size > 200) history.removeAt(0) }
-            if (done != null) ui.post { done(outcome) }
+            if (done != null) ui.post { if (requestedRevision == revision.get()) done(outcome) }
         }
     }
 
@@ -101,7 +113,10 @@ class EinkController(ctx: Context) {
     fun restore(done: ((String) -> Unit)? = null) = set(original, "restore", done)
 
     /** Blocking restore for lifecycle callbacks and crash handlers: the process may die right after. */
-    fun restoreNow() { try { setModeM?.invoke(mgr, original) } catch (_: Throwable) { } }
+    fun restoreNow() { synchronized(operationLock) {
+        revision.incrementAndGet()
+        try { setModeM?.invoke(mgr, original) } catch (_: Throwable) { }
+    } }
 
     fun historyText(): String = synchronized(history) { history.joinToString("\n") }.ifEmpty { "(no mode changes were requested)" }
 }

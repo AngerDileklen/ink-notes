@@ -29,13 +29,14 @@ import java.io.FileOutputStream
  */
 object NoteStore {
     private const val MAGIC = 0x494E4B4E   // "INKN"
-    private const val VERSION = 7
+    private const val VERSION = 8
 
     const val ITEM_STROKE = 1
     const val ITEM_SHAPE = 2
     const val ITEM_TEXT = 3
     const val ITEM_IMAGE = 4
     const val ITEM_TAPE = 5
+    const val ITEM_WIDTH_STROKE = 6
 
     class Header(val title: String, val created: Long, val modified: Long, val pageCount: Int)
 
@@ -49,11 +50,21 @@ object NoteStore {
      */
     fun save(note: NoteData, file: File, touch: Boolean = true) {
         file.parentFile?.mkdirs()
+        val version = if (note.pages.any { page -> page.items.any { it is Stroke && it.brush == Brush.NATIVE_WIDTH } }) VERSION else 7
+        if (version == 8 && file.exists()) {
+            val previousVersion = DataInputStream(file.inputStream().buffered()).use { input ->
+                require(input.readInt() == MAGIC) { "Refusing to overwrite an invalid notebook" }; input.readInt()
+            }
+            if (previousVersion in 1..7) {
+                val backup = File(file.parentFile, file.name + ".pre-v8.bak")
+                if (!backup.exists()) file.copyTo(backup, overwrite = false)
+            }
+        }
         if (touch) note.modified = System.currentTimeMillis()
         val tmp = File(file.parentFile, file.name + ".tmp")
         val fos = FileOutputStream(tmp)
         DataOutputStream(BufferedOutputStream(fos, 1 shl 16)).use { out ->
-            out.writeInt(MAGIC); out.writeInt(VERSION)
+            out.writeInt(MAGIC); out.writeInt(version)
             out.writeUTF(note.title); out.writeLong(note.created); out.writeLong(note.modified)
             out.writeInt(note.pages.size)
             for (page in note.pages) {
@@ -90,6 +101,16 @@ object NoteStore {
     private fun writeItem(out: DataOutputStream, item: Item) {
         when (item) {
             is Stroke -> {
+                val widths = item.renderedWidths
+                if (item.brush == Brush.NATIVE_WIDTH) {
+                    require(widths != null && widths.size == item.n && item.ps.isEmpty())
+                    require(item.n in 1..80_000 && item.ys.size == item.n)
+                    require(item.xs.all { it.isFinite() } && item.ys.all { it.isFinite() } && widths.all { it.isFinite() && it >= 0 })
+                    require(item.widthScale.isFinite() && item.widthScale > 0)
+                    out.writeByte(ITEM_WIDTH_STROKE); out.writeInt(item.gray); out.writeFloat(item.widthScale); out.writeInt(item.n)
+                    for (i in 0 until item.n) { out.writeFloat(item.xs[i]); out.writeFloat(item.ys[i]); out.writeFloat(widths[i]) }
+                    return
+                }
                 out.writeByte(ITEM_STROKE)
                 out.writeByte(item.brush.ordinal); out.writeInt(item.gray); out.writeFloat(item.widthScale)
                 out.writeFloat(item.nibAngle); out.writeFloat(item.nibFlat)
@@ -158,7 +179,7 @@ object NoteStore {
             DataInputStream(BufferedInputStream(FileInputStream(file), 1 shl 16)).use { inp ->
                 require(inp.readInt() == MAGIC) { "not a notebook file" }
                 val version = inp.readInt()
-                require(version in 1..7) { "unknown notebook version" }
+                require(version in 1..VERSION) { "unknown notebook version" }
                 val note = if (version >= 3) {
                     val title = inp.readUTF(); val created = inp.readLong(); val modified = inp.readLong()
                     NoteData(title, created).also { it.modified = modified }
@@ -194,6 +215,14 @@ object NoteStore {
     private fun readItem(inp: DataInputStream, version: Int): Item? {
         val type = if (version >= 3) inp.readByte().toInt() else ITEM_STROKE
         return when (type) {
+            ITEM_WIDTH_STROKE -> {
+                require(version >= 8) { "Width stroke in legacy notebook" }
+                val gray = inp.readInt(); val widthScale = inp.readFloat(); val n = inp.readInt()
+                require(n in 1..80_000) { "Invalid native stroke size" }
+                val xs = FloatArray(n); val ys = FloatArray(n); val widths = FloatArray(n)
+                for (i in 0 until n) { xs[i] = inp.readFloat(); ys[i] = inp.readFloat(); widths[i] = inp.readFloat() }
+                Stroke(Brush.NATIVE_WIDTH, gray, widthScale, xs, ys, FloatArray(0), renderedWidths = widths)
+            }
             ITEM_STROKE -> {
                 if (version >= 3) {
                     val brush = Brush.values().getOrElse(inp.readByte().toInt()) { Brush.PEN }

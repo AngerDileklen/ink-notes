@@ -20,7 +20,7 @@ enum class Tool { PEN, HIGHLIGHTER, CALLIGRAPHY, ERASER, SELECT, SHAPE, HAND, TE
 
 /** How a stroke looks. */
 /** FIXED (a pen with one constant width) was added later: brushes are stored by position, so new ones go at the end. */
-enum class Brush { PEN, HIGHLIGHTER, CALLIGRAPHY, FIXED }
+enum class Brush { PEN, HIGHLIGHTER, CALLIGRAPHY, FIXED, NATIVE_WIDTH }
 
 enum class Paper(val label: String) {
     BLANK("blank"), RULED("ruled"), GRID("squares (grid)"), DOTS("dots"), NARROW("narrow ruled"), CORNELL("Cornell notes"), MUSIC("music staff"),
@@ -74,29 +74,39 @@ abstract class Item {
 }
 
 class Stroke(
-    val brush: Brush,
+    var brush: Brush,
     var gray: Int,              // 0 = black .. 255 = white
     var widthScale: Float,      // multiplier on the brush's base width
     var xs: FloatArray,
     var ys: FloatArray,
     var ps: FloatArray,         // normalised pressure per point
     var nibAngle: Float = (Math.PI / 2).toFloat(),   // calligraphy only
-    var nibFlat: Float = 0.75f                       // calligraphy only
+    var nibFlat: Float = 0.75f,                      // calligraphy only
+    var renderedWidths: FloatArray? = null           // NATIVE_WIDTH only: actual page-unit diameters, not pressure
 ) : Item() {
     val n get() = xs.size
 
-    init { recomputeBounds() }
+    init {
+        if (brush == Brush.NATIVE_WIDTH) {
+            require(xs.isNotEmpty() && xs.size <= 80_000 && ys.size == xs.size && ps.isEmpty())
+            require(renderedWidths?.size == xs.size)
+            require(xs.all { it.isFinite() } && ys.all { it.isFinite() })
+            require(renderedWidths!!.all { it.isFinite() && it >= 0 })
+            require(widthScale.isFinite() && widthScale > 0)
+        } else require(renderedWidths == null)
+        recomputeBounds()
+    }
 
     override fun recomputeBounds() {
         var a = Float.MAX_VALUE; var b = Float.MAX_VALUE; var c = -Float.MAX_VALUE; var d = -Float.MAX_VALUE
         for (i in xs.indices) { a = min(a, xs[i]); c = max(c, xs[i]); b = min(b, ys[i]); d = max(d, ys[i]) }
         // ink has thickness: pad the bounds by the widest part of the stroke
-        val pad = if (brush == Brush.HIGHLIGHTER) HIGHLIGHTER_WIDTH * widthScale / 2f else 6f * widthScale / 2f + 1f
+        val pad = if (brush == Brush.NATIVE_WIDTH) (renderedWidths!!.maxOrNull() ?: 0f) * widthScale / 2f + 1f else if (brush == Brush.HIGHLIGHTER) HIGHLIGHTER_WIDTH * widthScale / 2f else 6f * widthScale / 2f + 1f
         minX = a - pad; minY = b - pad; maxX = c + pad; maxY = d + pad
     }
 
     override fun hit(x: Float, y: Float, r: Float): Boolean {
-        val rr = r + if (brush == Brush.HIGHLIGHTER) HIGHLIGHTER_WIDTH * widthScale / 2f else 0f
+        val rr = r + if (brush == Brush.NATIVE_WIDTH) (renderedWidths!!.maxOrNull() ?: 0f) * widthScale / 2f else if (brush == Brush.HIGHLIGHTER) HIGHLIGHTER_WIDTH * widthScale / 2f else 0f
         if (n == 1) return dist(x, y, xs[0], ys[0]) <= rr
         for (i in 0 until n - 1) {
             if (distToSegment(x, y, xs[i], ys[i], xs[i + 1], ys[i + 1]) <= rr) return true
@@ -113,7 +123,7 @@ class Stroke(
         recomputeBounds()
     }
 
-    override fun copy(): Item = Stroke(brush, gray, widthScale, xs.copyOf(), ys.copyOf(), ps.copyOf(), nibAngle, nibFlat)
+    override fun copy(): Item = Stroke(brush, gray, widthScale, xs.copyOf(), ys.copyOf(), ps.copyOf(), nibAngle, nibFlat, renderedWidths?.copyOf()).also { it.recId = recId; it.recMs = recMs }
 
     override fun fractionInside(poly: FloatArray): Float {
         if (n == 0) return 0f
@@ -128,6 +138,8 @@ class Stroke(
      */
     fun eraseCircle(cx: Float, cy: Float, r: Float): List<Stroke>? {
         if (n == 0 || !near(cx, cy, r)) return null
+        if (n == 1) return if (hit(cx, cy, r)) emptyList() else null
+        val samples = renderedWidths ?: ps
         val runs = ArrayList<FloatArray>()      // each run: x,y,p triples
         var cur = ArrayList<Float>()
         var touched = false
@@ -148,7 +160,7 @@ class Stroke(
                     val enter = t0 in 0f..1f; val leave = t1 in 0f..1f
                     if (enter || leave) {
                         touched = true
-                        val p0 = ps[i - 1]; val p1 = ps[i]
+                        val p0 = samples[i - 1]; val p1 = samples[i]
                         if (enter && !inside(i - 1)) {                 // path runs into the circle: end the run at the edge
                             cur.add(ax + dx * t0); cur.add(ay + dy * t0); cur.add(p0 + (p1 - p0) * t0)
                             flush()
@@ -161,13 +173,14 @@ class Stroke(
                 }
             }
             if (insideNow) { touched = true; flush() }
-            else { cur.add(xs[i]); cur.add(ys[i]); cur.add(ps[i]) }
+            else { cur.add(xs[i]); cur.add(ys[i]); cur.add(samples[i]) }
         }
         flush()
         if (!touched) return null
         return runs.map { run ->
             val k = run.size / 3
-            Stroke(brush, gray, widthScale, FloatArray(k) { run[it * 3] }, FloatArray(k) { run[it * 3 + 1] }, FloatArray(k) { run[it * 3 + 2] }, nibAngle, nibFlat)
+            Stroke(brush, gray, widthScale, FloatArray(k) { run[it * 3] }, FloatArray(k) { run[it * 3 + 1] }, if (renderedWidths == null) FloatArray(k) { run[it * 3 + 2] } else FloatArray(0), nibAngle, nibFlat,
+                if (renderedWidths != null) FloatArray(k) { run[it * 3 + 2] } else null)
                 .also { it.recId = recId; it.recMs = recMs }
         }
     }
